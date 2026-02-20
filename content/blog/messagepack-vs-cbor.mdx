@@ -1,0 +1,180 @@
+---
+title: "MessagePack vs. CBOR: Choosing an Encoding for OMS Grains"
+description: "A technical comparison of the two encoding options in the Open Memory Specification — MessagePack (default) and CBOR (optional) — covering deterministic rules, key sorting differences, float encoding, content address implications, and when to use each."
+date: "2026-02-19"
+readTime: "14 min read"
+tags: ["messagepack", "cbor", "encoding", "technical"]
+---
+
+The Open Memory Specification supports two binary serialization formats: MessagePack (the default) and CBOR (an optional alternative). Both are compact, schema-less binary encodings that map naturally to JSON-like data structures. Both work.
+
+But they are not interchangeable. The same grain encoded with MessagePack and CBOR produces **different bytes** — different SHA-256 hashes, different content addresses. This post covers how their deterministic rules differ, when to choose one over the other, and the consequences of mixing encodings in a content-addressed store.
+
+## MessagePack: The Default (Section 16.1)
+
+MessagePack is the default encoding for OMS grains. It is specified via the MessagePack format specification and is supported across 50+ programming languages. It is compact, fast to encode and decode, and human-debuggable with readily available tools.
+
+When the flags byte (byte 1 of the 9-byte header) has bit 5 set to `0`, the payload is MessagePack-encoded. Since all flags bits default to zero, every OMS grain uses MessagePack unless explicitly opted into CBOR.
+
+OMS does not use raw MessagePack encoding. It uses **canonical MessagePack** as defined in Section 4 of the spec, which adds deterministic rules on top of the base format:
+
+- **Key ordering:** Map keys sorted lexicographically by UTF-8 byte representation, applied recursively to all nested maps.
+- **Integer encoding:** Smallest representation that fits the value. The integer `42` is a positive fixint (1 byte), not a uint8 (2 bytes).
+- **Float encoding:** Always IEEE 754 double precision (float64, 8 bytes). Single-precision float32 is never used. NaN and Infinity are rejected.
+- **String encoding:** UTF-8, NFC-normalized. No byte-order mark.
+- **Null omission:** Map entries with null values are omitted entirely.
+- **No duplicate keys.**
+
+These rules ensure that any two conformant MessagePack encoders, given the same logical input, produce the same bytes. This is what makes content addressing work.
+
+### MessagePack Library Recommendations
+
+The spec provides a recommended library for each major language:
+
+| Language | Library | Sorted Keys | Notes |
+|----------|---------|-------------|-------|
+| Python | `ormsgpack` | `OPT_SORT_KEYS` | Rust-backed, fastest option |
+| Python | `msgpack` | `sort_keys=True` | Pure Python fallback |
+| Rust | `rmp-serde` | Via `BTreeMap` | Natural ordering from data structure |
+| Go | `msgpack/v5` | Manual sorting | You are responsible for key ordering |
+| JavaScript | `@msgpack/msgpack` | Pre-sort keys | Manual sorting required before encoding |
+| Java | `jackson-dataformat-msgpack` | `SORT_PROPERTIES_ALPHABETICALLY` | Feature flag on ObjectMapper |
+| C# | `MessagePack-CSharp` | Via `SortedDictionary` | Built-in support |
+
+<Callout type="warning">
+Not all libraries sort keys by default. In Go and JavaScript, you must sort keys manually before encoding. Relying on language-default map ordering is the most common cause of content address mismatches.
+</Callout>
+
+## CBOR: The Optional Alternative (Section 16.2)
+
+CBOR (Concise Binary Object Representation) is defined in RFC 8949. It is an IETF standards-track format designed for constrained environments and closely integrated with the COSE signing standard (RFC 9052).
+
+In OMS, CBOR encoding is optional and indicated by setting bit 5 of the flags byte to `1`. When a parser encounters a grain with this bit set, it knows to decode the payload as CBOR instead of MessagePack.
+
+OMS uses **Deterministic CBOR** as defined in RFC 8949 Section 4.2.1 (Preferred Serialization). This is analogous to OMS's canonical MessagePack rules — it constrains the encoding to eliminate ambiguity. The spec lists seven rules:
+
+**1. Map keys sorted by encoded form (lexicographic on CBOR bytes).** This is the same principle as MessagePack's key sorting, but with a critical difference in the sorting mechanism (discussed below).
+
+**2. Integers in smallest encoding.** Same as MessagePack: use the fewest bytes that represent the value.
+
+**3. No indefinite-length values.** CBOR supports both definite-length and indefinite-length encoding for strings, arrays, and maps. Deterministic CBOR requires definite-length only. Every string, array, and map must declare its length upfront.
+
+**4. Single NaN representation.** While OMS's canonical MessagePack rules reject NaN entirely, Deterministic CBOR allows exactly one NaN bit pattern. In practice, OMS grains should not contain NaN values regardless of encoding (confidence and importance are bounded to [0.0, 1.0]), but the CBOR rule provides a fallback.
+
+**5. Shortest floating-point form that preserves value.** This is the biggest behavioral difference from MessagePack. CBOR will encode `1.5` as a half-precision binary16 float (3 bytes: `0xf93e00`), `1000000.5` as a single-precision binary32 float (5 bytes), and values that require full precision as binary64 (9 bytes). It does NOT convert floats to integers — `1.0` is still a float, not the integer `1`.
+
+**6. Strings are UTF-8 NFC-normalized.** Same as MessagePack.
+
+**7. No duplicate keys.** Same as MessagePack.
+
+## The Critical Difference: Content Addresses
+
+Here is the single most important fact about the two encodings:
+
+**The same grain encoded as MessagePack and CBOR produces DIFFERENT content addresses.**
+
+This is not a bug. It is an inherent consequence of content addressing. The content address is the SHA-256 hash of the blob bytes. MessagePack and CBOR produce different bytes for the same logical data. Different bytes mean different hashes.
+
+Consider a Fact grain with `confidence: 0.9`. In canonical MessagePack, this value is always encoded as float64 (9 bytes: `cb` marker + 8 bytes of IEEE 754 double). In Deterministic CBOR, the encoder checks whether `0.9` can be represented in binary16 (half precision) without loss. It cannot (0.9 is a repeating fraction in binary), so CBOR also uses binary64 for this particular value. But the CBOR binary64 encoding uses different framing bytes than MessagePack's — CBOR uses major type 7 with additional information value 27, while MessagePack uses the `0xcb` format marker. The payload bytes are the same IEEE 754 representation, but the framing differs.
+
+For `1.5`, the difference is more dramatic. MessagePack encodes it as float64 (9 bytes). CBOR encodes it as binary16 (3 bytes: `0xf93e00`), because `1.5` can be represented exactly in half precision. Same value, six bytes smaller, completely different blob.
+
+<Callout type="security">
+You CANNOT mix MessagePack and CBOR grains in the same content-addressed store without tracking which encoding was used. If you store a MessagePack-encoded grain and later verify by re-encoding as CBOR, the hash will not match. The encoding format is an intrinsic part of grain identity.
+</Callout>
+
+## Key Sorting: A Subtle but Real Difference
+
+Both MessagePack and CBOR require sorted map keys, but the sorting criteria differ:
+
+- **MessagePack:** Sort by raw UTF-8 string bytes. Compare byte 0 of key A with byte 0 of key B. If equal, advance. Shorter keys sort before longer keys when all leading bytes match.
+
+- **Deterministic CBOR:** Sort by encoded form — that is, by the CBOR byte representation of each key. CBOR encodes string length before the string content. A 1-character key has a different length prefix than a 23-character key. The sort compares these length-prefixed byte sequences.
+
+In most cases, the two sorting methods produce the same key order. UTF-8 string comparison and CBOR-encoded-form comparison agree for keys of different lengths and different leading characters. But edge cases exist. Consider two keys: `"a"` (1 byte) and `"ab"` (2 bytes). In UTF-8 byte sorting, `"a"` < `"ab"` because after matching the first byte, `"a"` has no more bytes. In CBOR encoded form, `"a"` is `0x6161` (1-byte string marker + content) and `"ab"` is `0x626162` (2-byte string marker + content). The comparison is `0x61` vs `0x62` — same result, `"a"` < `"ab"`. But with longer keys where length prefix bytes differ meaningfully, the orderings can diverge.
+
+For typical OMS field names (short, ASCII, distinct first bytes), this difference is unlikely to matter. But an implementation that claims CBOR conformance MUST sort by CBOR encoded form, not by UTF-8 string bytes.
+
+## Float Encoding: Size Impact
+
+The float encoding difference has a direct impact on blob size:
+
+**MessagePack:** Every floating-point value is encoded as float64. This is 9 bytes per float (1-byte format marker + 8-byte IEEE 754 double). No exceptions. A confidence value of `1.0` takes 9 bytes. An importance value of `0.5` takes 9 bytes. This simplicity eliminates ambiguity — there is exactly one way to encode any float.
+
+**Deterministic CBOR:** The shortest floating-point form that preserves the value is used. The encoder attempts half-precision (3 bytes), then single-precision (5 bytes), then double-precision (9 bytes), selecting the shortest that round-trips to the same value. Crucially, this rule does NOT convert floats to integers: `1.0` remains a float, even though it could be represented as the integer `1`.
+
+For a grain with two float fields (confidence and importance), the difference ranges from 0 bytes (when both values require full double precision) to 12 bytes (when both can be represented in half precision). For a minimal Fact grain of roughly 159 bytes, that is a 0-8% size reduction.
+
+The trade-off is implementation complexity. A CBOR encoder must implement the precision reduction algorithm: encode as binary64, then test-convert to binary32 and compare; if equal, test-convert to binary16 and compare. This adds code paths and potential for bugs. A MessagePack encoder simply writes float64 every time.
+
+## The Flags Byte
+
+The encoding format is declared in the grain's flags byte (byte 1 of the 9-byte header):
+
+```
+Bit 5: cbor_encoding
+  0 = MessagePack (default)
+  1 = CBOR
+```
+
+This means a parser can determine the encoding without attempting trial decoding. Read byte 1, check bit 5, and use the appropriate decoder. This design avoids the ambiguity that would arise from auto-detection.
+
+The flags byte is part of the header, and the header is part of the hashed blob. So the encoding choice is bound into the content address. A grain's identity includes not just what it says, but how it is encoded.
+
+## When to Use MessagePack
+
+MessagePack is the right choice for most implementations. Use it when:
+
+- **Universal compatibility matters.** MessagePack libraries exist for 50+ languages. Any OMS implementation you encounter is virtually guaranteed to support MessagePack. CBOR support, while broad, is not quite as universal.
+
+- **You want the simplest implementation.** MessagePack's canonical rules are straightforward: sort keys by UTF-8 bytes, use float64 always, use smallest integer encoding. There is no precision reduction algorithm for floats, no CBOR-specific length prefix sorting.
+
+- **Performance is the priority.** MessagePack encoders and decoders are mature and heavily optimized. Libraries like `ormsgpack` (Python, Rust-backed) achieve very high throughput.
+
+- **You are building a general-purpose OMS tool.** Viewers, validators, migration utilities, and most application-level integrations should default to MessagePack.
+
+## When to Use CBOR
+
+CBOR is the right choice in specific scenarios:
+
+- **IETF standards track alignment.** If your system already uses CBOR for other protocols (CoAP, COSE, CWT), using CBOR for OMS grains reduces format mixing. You can use a single CBOR codec for all wire formats.
+
+- **COSE signatures.** OMS cryptographic signing uses COSE Sign1 envelopes (RFC 9052). COSE is inherently a CBOR format. When you are signing grains, the outer COSE wrapper is always CBOR. If the inner grain payload is also CBOR, the entire structure is homogeneous CBOR — simpler to process and debug.
+
+- **Constrained devices.** CBOR was designed for constrained environments (RFC 7228). Its shortest-float-form rule reduces payload size. For IoT sensors generating high volumes of Observation grains with float-representable values, the per-grain savings add up.
+
+- **Regulatory or organizational requirements.** Some government and standards bodies require IETF standards-track formats. CBOR (RFC 8949) has a formal RFC. MessagePack does not — its specification lives on GitHub.
+
+## Practical Consequences for Store Design
+
+If you are building an OMS store, the encoding choice creates a design decision:
+
+**Option 1: Single encoding (recommended).** Pick MessagePack or CBOR for your entire store. All grains use the same encoding. Content address lookups are unambiguous. This is the simplest approach.
+
+**Option 2: Mixed encoding with encoding tracking.** Accept both MessagePack and CBOR grains. Store the encoding alongside each grain (or derive it from the flags byte on read). Content address verification requires knowing which encoding was used to produce the blob. This is more flexible but adds complexity to every hash verification path.
+
+**Option 3: Transcode on ingest.** Accept either encoding, transcode to your preferred format on write. This normalizes the store but changes content addresses — the grain's identity changes. You must store original blob bytes or accept that links from other systems referencing the original address will break.
+
+<Callout type="info">
+Option 1 is almost always the right choice. If you must interoperate with a system using the other encoding, transcode at the boundary and maintain a mapping of original-to-transcoded content addresses.
+</Callout>
+
+## COSE and CBOR: Natural Affinity
+
+OMS cryptographic signing uses COSE Sign1 envelopes as defined in RFC 9052. COSE is natively a CBOR format — the protected headers, unprotected headers, payload, and signature are all CBOR-encoded.
+
+Signing a MessagePack grain produces CBOR (COSE wrapper) containing MessagePack (payload) — requiring both codecs. Signing a CBOR grain makes the entire structure homogeneous CBOR, needing only one codec. This is cleaner in constrained environments where minimizing library dependencies matters.
+
+This does not mean you should switch to CBOR just because you use signing. But if starting fresh with signing as a core requirement, CBOR reduces serialization formats in your stack from two to one.
+
+## Size Comparison
+
+For a concrete comparison, consider the Vector 1 test grain (a minimal Fact with 9 fields). As MessagePack, the blob is 159 bytes. A CBOR encoding of the same grain would use different framing bytes for strings, maps, and integers, but the overall size difference is modest for text-heavy grains.
+
+The CBOR shortest-float optimization saves bytes only when float values happen to be representable in half or single precision. Confidence values like `0.9`, `0.95`, and `0.85` are repeating fractions in binary and require full double precision in both formats. Values that benefit are those exact in reduced precision: `0.5`, `0.25`, `1.0`, `0.75` (all representable in binary16). If your application frequently uses these "round" confidence values, CBOR will be slightly more compact. For arbitrary decimal values, the savings are zero.
+
+## Conclusion
+
+For most implementations, MessagePack is the right choice — broadest library support, simplest canonical rules, universal compatibility. Choose CBOR when you are already in a CBOR ecosystem (COSE signing, CoAP transport), targeting constrained devices, or when organizational requirements favor IETF standards-track RFCs.
+
+The encoding is part of the content address. A MessagePack grain and a CBOR grain with the same logical content are different grains with different identities. Choose one, be consistent, and document your decision.

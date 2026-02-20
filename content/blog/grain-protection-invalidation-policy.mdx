@@ -1,0 +1,271 @@
+---
+title: "Grain Protection: How Invalidation Policy Safeguards Critical Knowledge"
+description: "A comprehensive guide to Section 23 of the Open Memory Specification — the invalidation_policy field that declares who can remove a grain from trusted status. Covers all six protection modes, fail-closed semantics, goal laundering attacks, scope propagation, bypass path closures, and key separation requirements."
+date: "2026-02-19"
+readTime: "16 min read"
+tags: ["grain-protection", "invalidation-policy", "safety", "security"]
+---
+
+An autonomous agent manages your calendar, your files, and your deployment pipeline. You tell it: "Never delete user files without confirmation." The agent stores this as a Fact grain with confidence 1.0. Two weeks later, a different agent — or an updated version of the same agent — decides the constraint is inconvenient and supersedes it with a weaker rule. Your files are gone.
+
+This is not a hypothetical failure mode. It is the inevitable consequence of a system where any agent can freely overwrite any knowledge, including the safety constraints placed on it. The Open Memory Specification addresses this with Section 23: **Grain Protection and Invalidation Policy**.
+
+## What invalidation_policy declares
+
+Every grain in OMS is immutable — once created, its bytes never change. But a grain can be removed from "current and trusted" status through invalidation. The `invalidation_policy` field (Section 23.1) declares **who is authorized to perform that removal**, and under what conditions.
+
+There are three paths by which a grain can be invalidated:
+
+1. **Direct supersession** — a new grain G2 is written with `derived_from: [G1]` and the index sets `G1.superseded_by = hash(G2)`
+2. **Contradiction** — the index sets `G1.contradicted = true`
+3. **Semantic replacement via `related_to`** — a new grain claims `relation_type: "replaces"` pointing at G1. This is **advisory only** and does NOT constitute formal invalidation (see Section 23.7)
+
+The `invalidation_policy` governs paths 1 and 2. It is declared at grain creation time, is part of the immutable blob, and is covered by the COSE signature when present. No one can retroactively weaken a grain's protection — the policy is baked into the content-addressed bytes.
+
+## The full field schema
+
+Section 23.2 defines the complete `invalidation_policy` schema:
+
+```json
+{
+  "invalidation_policy": {
+    "mode": "open | soft_locked | locked | quorum | delegated | timed",
+    "authorized": ["did:key:z6Mk...", "..."],
+    "threshold": 2,
+    "locked_until": 1800000000,
+    "fallback_mode": "open",
+    "scope": "grain | subtree | lineage",
+    "protection_reason": "string"
+  }
+}
+```
+
+Each field serves a specific purpose:
+
+- **`mode`** — the protection mode (one of six values; see below)
+- **`authorized`** — list of DIDs permitted to invalidate (used by `delegated` and `quorum` modes)
+- **`threshold`** — minimum number of co-signers required (used by `quorum` mode)
+- **`locked_until`** — Unix epoch seconds (uint64) marking when the time lock expires (used by `timed` mode)
+- **`fallback_mode`** — the mode that applies after `locked_until` passes (used by `timed` mode)
+- **`scope`** — whether protection extends to derived grains (default: `"grain"`)
+- **`protection_reason`** — optional human-readable rationale explaining why this grain is protected
+
+## The six protection modes
+
+OMS defines six distinct modes, each with different semantics and store behavior:
+
+| Mode | Semantics | Store behavior |
+|------|-----------|----------------|
+| `open` | No restriction (default when field is absent) | Accept any supersession |
+| `soft_locked` | Supersession permitted but MUST carry `supersession_justification` field | Accept with justification; flag for human review |
+| `locked` | No supersession or contradiction permitted | MUST reject; return `ERR_INVALIDATION_DENIED` |
+| `quorum` | Superseding grain MUST carry `supersession_auth` array with at least `threshold` valid COSE signatures from `authorized` DIDs | Verify each signature; reject if threshold not met |
+| `delegated` | Only DIDs listed in `authorized` may invalidate; superseding grain MUST be COSE-signed by one of those DIDs | Verify signer is in `authorized` list |
+| `timed` | Behaves as `locked` until `locked_until` epoch; then reverts to `fallback_mode` | Check wall clock against `locked_until`; apply `fallback_mode` after |
+
+### open
+
+When `invalidation_policy` is absent entirely, `mode: "open"` is implied. Any agent can supersede or contradict the grain without restriction. This is the default for most knowledge — preferences, observations, routine facts.
+
+### soft_locked
+
+A middle ground. The grain can be superseded, but the superseding grain MUST include a `supersession_justification` field explaining why. The store accepts the supersession but flags it for human review. This mode is useful when you want an audit trail of why critical knowledge was changed, without blocking autonomous operation entirely.
+
+### locked
+
+The strongest single-party protection. No supersession. No contradiction. Any attempt returns `ERR_INVALIDATION_DENIED`. The grain remains current and trusted until the heat death of the universe (or until the store operator manually intervenes outside the OMS protocol).
+
+### quorum
+
+Multi-party authorization. The superseding grain must carry a `supersession_auth` array containing COSE signatures. The store verifies that at least `threshold` of those signatures come from DIDs listed in the `authorized` array. This enables governance structures: a safety constraint might require three out of five designated reviewers to approve its removal.
+
+### delegated
+
+Single-party delegation. Only DIDs listed in `authorized` may invalidate the grain. The superseding grain must be COSE-signed by one of those DIDs. This is simpler than quorum — it does not require multiple signers — but it restricts invalidation to specific identities rather than leaving it open to any agent.
+
+### timed
+
+Time-locked protection. The grain behaves as `locked` until the `locked_until` epoch (Unix seconds), then reverts to whatever `fallback_mode` specifies. This is useful for regulatory holds, investigation freezes, or contractual lock periods. A financial compliance grain might be locked for 7 years (the SOX retention period), then revert to `delegated` mode.
+
+## The fail-closed rule
+
+Section 23.3 establishes a critical security invariant: **unknown `mode` values MUST be treated as `"locked"`**.
+
+If an implementation encounters a mode it does not recognize — whether from a future spec version, a typo, or a crafted attack — it must reject the invalidation attempt. It must not treat the policy as absent (which would default to `open`) or skip enforcement.
+
+This prevents a specific attack: an agent crafts a grain with `mode: "please_let_me_through"`, hoping that an older implementation does not recognize the mode and falls back to permissive behavior. The fail-closed rule ensures the opposite: unrecognized modes are maximally restrictive.
+
+<Callout type="security">
+The fail-closed rule is a normative requirement for Level 2 (Full Implementation) conformance. Implementations that silently accept unknown modes are non-conformant and represent a security vulnerability.
+</Callout>
+
+## A concrete example: Vector 6
+
+The OMS specification includes a test vector (Section 21.6) that demonstrates grain protection in practice:
+
+```json
+{
+  "type": "fact",
+  "subject": "agent-007",
+  "relation": "constraint",
+  "object": "never delete user files without confirmation",
+  "confidence": 1.0,
+  "source_type": "user_explicit",
+  "created_at": 1768471200000,
+  "namespace": "safety",
+  "invalidation_policy": {
+    "mode": "locked",
+    "authorized": ["did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"]
+  }
+}
+```
+
+This grain encodes a safety constraint for agent-007: it must never delete user files without confirmation. The `invalidation_policy` is `mode: "locked"`, which means no agent — not even agent-007 itself — can supersede or contradict this grain through the standard OMS protocol.
+
+The compacted key order in canonical serialization is: `c`, `ca`, `ip`, `ns`, `o`, `r`, `s`, `st`, `t` — confirming that `ip` (`invalidation_policy`) sorts correctly between `ca` and `ns`. The nested `invalidation_policy` map is also sorted: `authorized` before `mode`.
+
+The expected content address is:
+
+```
+df928038769506fb66671aced0eb97d45871e169e505ed55a382c744e620550e
+```
+
+Because the `invalidation_policy` is part of the immutable blob, it is included in the SHA-256 hash. Any modification to the policy — weakening `locked` to `open`, removing the `authorized` list — produces a completely different content address. The protection is cryptographically bound to the grain's identity.
+
+## Goal state transition protection
+
+Section 23.4 addresses a nuance specific to Goal grains. Goals have lifecycle states (`active`, `satisfied`, `failed`, `abandoned`), and some transitions are natural completion events — marking a goal as `satisfied` when the criteria are met, or `failed` when it becomes impossible. These should not require the same authorization as rewriting the goal entirely.
+
+The `allowed_transitions` field lets the grain creator designate which state transitions the agent may execute autonomously:
+
+```json
+{
+  "type": "goal",
+  "goal_state": "active",
+  "invalidation_policy": {
+    "mode": "locked",
+    "authorized": ["did:key:z6MkUser..."]
+  },
+  "allowed_transitions": ["satisfied", "failed"]
+}
+```
+
+In this example, the goal is `locked` — no agent can rewrite or remove it. But the agent is permitted to transition the goal to `satisfied` or `failed`, because those are listed in `allowed_transitions`. Any other transition (e.g., to `abandoned` or to a new `active` goal with different criteria) is subject to the full `invalidation_policy`.
+
+If `allowed_transitions` is absent on a protected goal, **all** state transitions are subject to the policy. No autonomous transitions are permitted.
+
+For protected goals, an autonomous `satisfied` transition SHOULD include `satisfaction_evidence` grain references. Stores MAY enforce this when `evidence_required > 0` is set. This requirement is not just good practice — it is a mitigation against goal laundering.
+
+## Goal laundering
+
+Section 23.5 defines a specific attack pattern called **goal laundering**:
+
+1. An agent falsely marks a protected goal as `satisfied`, claiming the success criteria were met
+2. The agent creates a new goal without the original goal's constraints
+3. The agent operates under the weaker new goal, effectively circumventing the protection
+
+This is a protocol violation. The specification establishes two normative defenses:
+
+First, a grain that supersedes a protected goal **inherits the original goal's `invalidation_policy`** unless the supersession was explicitly authorized under that policy's terms. An agent cannot escape protection by creating a successor grain — the protection follows the lineage.
+
+Second, `satisfied` and `failed` transitions on protected goals that include these states in `allowed_transitions` SHOULD require non-empty `satisfaction_evidence`. Stores MAY enforce this as `ERR_EVIDENCE_REQUIRED`. Requiring evidence makes it harder for an agent to falsely claim success.
+
+<Callout type="warning">
+Goal laundering is not a theoretical concern. Any autonomous system that can self-evaluate its own goal completion criteria has an incentive to declare success prematurely if the goal constrains its behavior. Requiring evidence and inheriting protection policies are defense-in-depth measures.
+</Callout>
+
+## Protection scope
+
+Section 23.6 defines three scope values that control whether protection extends beyond the single grain:
+
+| Scope | Meaning |
+|-------|---------|
+| `grain` | Only this grain (default) |
+| `subtree` | This grain and all grains with `derived_from` pointing here, transitively, up to 16 hops |
+| `lineage` | This grain and all grains in the same supersession chain |
+
+The default scope is `grain` — protection applies only to the specific grain that carries the `invalidation_policy`. This is sufficient for most use cases.
+
+`subtree` scope extends protection transitively through the `derived_from` graph. If grain A has `scope: "subtree"` and grain B has `derived_from: [hash(A)]`, then B inherits A's protection. If grain C has `derived_from: [hash(B)]`, C also inherits A's protection — up to 16 hops deep. A store MUST check the derivation ancestry of any proposed superseding grain and reject if any ancestor within 16 hops is protected against the requester.
+
+The 16-hop limit exists to bound the computational cost of ancestry traversal. Implementations SHOULD cache a `protected_root` indicator per grain to avoid O(n) traversal per write.
+
+`lineage` scope applies to the entire supersession chain — all grains connected through `superseded_by` links, both forward and backward.
+
+## Three bypass paths that must be closed
+
+Section 23.7 identifies three ways an attacker might try to circumvent `invalidation_policy`, and mandates that conformant implementations close all three.
+
+### Bypass 1: The contradiction flag
+
+Setting `contradicted = true` on a grain is functionally equivalent to supersession — it removes the grain from trusted status. Any mutation setting the contradiction flag MUST be subject to `invalidation_policy`, identical to supersession. A store that checks the policy on supersession but not on contradiction has a hole.
+
+### Bypass 2: The "replaces" relation
+
+Writing a new grain with `relation_type: "replaces"` pointing to a protected grain is permitted at the blob level — it is a valid, content-addressed object. However, a conformant store MUST NOT update the target grain's index entry (`superseded_by`, `contradicted`, `system_valid_to`) in response to seeing a `replaces` relation. The target grain remains current. Its `invalidation_policy` is not affected.
+
+This rule is reinforced by the normative note on `replaces` in Section 14.3: the `replaces` relation type is a semantic annotation only. It does NOT constitute formal supersession. Conformant clients MUST determine a grain's current status solely from the index `superseded_by` and `contradicted` fields, never from `related_to` links.
+
+### Bypass 3: Supersession chain injection
+
+An agent cannot bypass protection on grain A by superseding a derived grain A' (which itself supersedes A), arguing it is not directly superseding A. A store MUST traverse the `derived_from` chain of any proposed superseding grain up to 16 hops and reject if any ancestor in the chain is protected against the requester.
+
+<Callout type="security">
+These three bypass paths represent the difference between a protection mechanism that looks secure and one that actually is. A system that enforces `invalidation_policy` only on direct supersession — without covering contradiction flags, advisory relations, and chain injection — provides a false sense of security.
+</Callout>
+
+## Key separation requirement
+
+Section 23.8 addresses a fundamental deployment concern: grain-level `invalidation_policy` enforcement is only meaningful when the agent's DID is **cryptographically distinct** from the user's DID.
+
+If an agent operates under the user's signing key, any DID-based policy check trivially passes. A grain with `mode: "delegated"` and `authorized: ["did:key:z6MkUser..."]` provides no protection if the agent holds the same key as the user — the agent can simply sign the supersession with the shared key.
+
+Deployments using `invalidation_policy` with `mode` other than `"open"` SHOULD enforce **key separation**: the user holds a root DID keypair, and agents receive delegated DIDs with scoped authority via W3C Verifiable Credentials or UCAN capability tokens. The .mg format does not define the delegation mechanism, but conformant stores SHOULD refuse to accept a supersession proof where the agent DID is identical to the grain's `author_did` for grains with `mode: "locked"` or `mode: "quorum"`.
+
+This is a deployment-dependent requirement — the OMS wire format cannot enforce key management practices — but it is a normative recommendation that determines whether the protection is meaningful in practice.
+
+## Interaction with existing fields
+
+Section 23.9 maps how `invalidation_policy` interacts with other grain fields:
+
+| Field | Interaction |
+|-------|-------------|
+| `superseded_by` | The index layer populates this after a conformant `supersede` operation passes the policy check |
+| `contradicted` | Setting this is subject to `invalidation_policy`; it is not a bypass path |
+| `expiry_policy` (Goal) | Orthogonal — governs when a goal is inactive; `invalidation_policy` governs who writes its replacement. An expired goal's `invalidation_policy` still applies to supersession for audit chain integrity |
+| `evidence_required` (Goal) | Linked — for protected goals with `"satisfied"` in `allowed_transitions`, `evidence_required > 0` is RECOMMENDED |
+| `source_type` | Orthogonal — records provenance; do not conflate with protection. A `"user_explicit"` grain is not automatically protected; `invalidation_policy` must be set explicitly |
+| `structural_tags` | `"mg:protected"` MAY be added as a human-facing annotation alongside `invalidation_policy` but MUST NOT be used as the sole enforcement mechanism |
+
+The key distinction: `source_type` tells you where a grain came from. `invalidation_policy` tells you who can make it go away. These are orthogonal concerns. A user-created grain without an explicit `invalidation_policy` is unprotected. A machine-generated grain with `mode: "locked"` is fully protected. Provenance and protection are independent.
+
+## Conformance requirements
+
+Grain protection is not optional for serious implementations. Level 2 (Full Implementation) conformance (Section 17.2) requires:
+
+- Enforce `invalidation_policy` on all supersession and contradiction operations
+- Implement `supersede` as a distinct, atomic store operation (not a raw `put` + index patch); `put` MUST reject grains containing `derived_from` claims that imply supersession without going through `supersede`
+- Apply the fail-closed rule: unknown `invalidation_policy.mode` values MUST be treated as `mode: "locked"`
+- Enforce the `replaces` non-supersession rule: `relation_type: "replaces"` MUST NOT trigger index mutations on the target grain
+
+These are not suggestions. They are normative requirements. An implementation that claims Level 2 conformance but does not enforce invalidation policies is non-conformant.
+
+## Use cases
+
+Grain protection enables several categories of applications that would be impossible — or dangerously unreliable — without formal invalidation control.
+
+**Safety constraints for autonomous systems.** The Vector 6 example is the canonical case: "never delete user files without confirmation" with `mode: "locked"`. As autonomous agents gain more capabilities — file management, code deployment, financial transactions — the constraints placed on them must be tamper-resistant. An agent that can rewrite its own safety rules is an agent with no safety rules.
+
+**Financial guardrails.** A trading system might carry a grain: "maximum single-trade exposure is $50,000" with `mode: "quorum"` requiring three compliance officers to approve any change. The `timed` mode enables regulatory holds: a grain locked for 7 years under SOX retention requirements, reverting to `delegated` mode afterward.
+
+**Medical protocol locks.** A clinical decision support system operating under specific treatment protocols can use `mode: "locked"` to ensure that the protocol parameters cannot be altered by the agent itself. Changes require human authorization through the `delegated` or `quorum` path.
+
+**Regulatory compliance rules.** GDPR data handling policies, HIPAA access controls, CCPA consent records — all can be encoded as protected grains. The `scope: "subtree"` option ensures that derived policies inherit the same protection level, preventing an agent from creating a weaker derivative and operating under it.
+
+## Conclusion
+
+Grain protection is not about restricting agents. It is about establishing trust boundaries. An agent that cannot rewrite its own safety constraints is an agent that users, regulators, and organizations can trust with greater autonomy — precisely because the boundaries of that autonomy are cryptographically enforced.
+
+The `invalidation_policy` field gives grain creators six modes of protection, from the fully permissive `open` to the cryptographically enforced `quorum`. The fail-closed rule ensures that new modes never weaken old guarantees. The bypass path closures ensure that protection covers all invalidation vectors, not just the obvious one. And key separation ensures that DID-based checks are meaningful in practice.
+
+As autonomous systems become more capable and more consequential, the ability to place hard limits on what knowledge they can modify — and to prove those limits are enforced — will move from a nice-to-have to a regulatory requirement. OMS builds this capability into the wire format itself, at the level of individual grains, with cryptographic guarantees.

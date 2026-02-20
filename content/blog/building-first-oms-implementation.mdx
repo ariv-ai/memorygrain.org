@@ -1,0 +1,284 @@
+---
+title: "Building Your First OMS Implementation: A Practical Guide"
+description: "A step-by-step guide to implementing the Open Memory Specification, from Level 1 Minimal Reader through Level 3 Production Store — with test vectors, library recommendations, and common pitfalls to avoid."
+date: "2026-02-19"
+readTime: "16 min read"
+tags: ["implementation", "conformance", "getting-started", "tutorial"]
+---
+
+You understand the concepts — content addressing, canonical serialization, field compaction, the seven memory types. Now you want to build something. Where do you start?
+
+The OMS v1.0 specification defines three conformance levels, each building on the last. This post walks through all three, then provides a step-by-step guide for implementing Level 1 — the minimum viable OMS implementation — using the spec's test vectors to verify correctness.
+
+## The Three Conformance Levels
+
+Every OMS implementation MUST declare which conformance level it supports. The levels are cumulative: Level 2 includes everything in Level 1, and Level 3 includes everything in Level 2.
+
+### Level 1: Minimal Reader
+
+Level 1 is sufficient for reading, verifying, and storing grains. It requires six capabilities:
+
+1. **Deserialize version byte + canonical MessagePack payload** — Parse the 9-byte fixed header and decode the MessagePack map that follows it.
+2. **Compute and verify SHA-256 content addresses** — Hash the entire blob (header + payload) and compare against a claimed content address.
+3. **Support field compaction (short keys to full names)** — When you encounter a key `"s"` in the payload, you must know it means `"subject"`. When you encounter `"c"`, it means `"confidence"`. The full mapping is in Section 6 of the spec.
+4. **Support all 7 memory types** — Fact, Episode, Checkpoint, Workflow, ToolCall, Observation, and Goal. Your deserializer must handle the required fields for each.
+5. **Ignore unknown fields** — If you encounter a key that is not in the field compaction mapping, preserve it as-is. Do not error. This is how OMS achieves forward compatibility.
+6. **Constant-time hash comparison** — When verifying content addresses, use a constant-time comparison function, not string equality. This prevents timing attacks where an adversary measures response times to guess hash values byte by byte.
+
+Level 1 is the right starting point for read-only tools: a grain viewer, a verification utility, a log ingestion pipeline that needs to validate integrity without writing new grains.
+
+### Level 2: Full Implementation
+
+Level 2 adds writing capabilities and strict enforcement. All Level 1 requirements, plus:
+
+- **Serialize (full names to short keys)** — The reverse of Level 1 compaction.
+- **Enforce canonical MessagePack rules** — Sorted keys, smallest integer encoding, float64 only, NFC-normalized strings, null omission.
+- **Validate required fields per schema** — A Fact must have `type`, `subject`, `relation`, `object`, `confidence`, `source_type`, and `created_at`. Reject grains with missing required fields.
+- **Pass all test vectors** — The spec provides six test vectors with expected content addresses.
+- **Support multi-modal content references** — Handle `content_refs` and `embedding_refs` arrays, including their nested field compaction.
+- **Implement Store protocol** — `get`, `put`, `delete`, `list`, `exists` operations for grain storage.
+- **Enforce invalidation_policy on supersession and contradiction** — When a grain carries an `invalidation_policy`, your store must check it before allowing supersession or contradiction.
+- **Implement supersede as a distinct atomic operation** — Not a raw `put` followed by an index patch. A `put` MUST reject grains containing `derived_from` claims that imply supersession without going through `supersede`.
+- **Fail-closed on unknown invalidation modes** — Unrecognized `invalidation_policy.mode` values are treated as `"locked"`. Never default to permissive.
+- **Enforce the replaces non-supersession rule** — `relation_type: "replaces"` in `related_to` is advisory. It MUST NOT trigger index mutations on the target grain.
+
+### Level 3: Production Store
+
+Level 3 is a complete, production-ready memory store. All Level 2 requirements, plus:
+
+- **At least one persistent backend** — Filesystem, S3, database, or similar. In-memory-only does not qualify.
+- **AES-256-GCM encrypted grain envelopes** — Per-grain encryption with authenticated encryption.
+- **Per-user key derivation (HKDF-SHA256)** — Derive individual encryption keys from a master key and user_id, enabling O(1) GDPR erasure via key destruction.
+- **Blind-index tokens for encrypted search** — HMAC-based tokens that allow querying encrypted fields without decryption.
+- **Hexastore index** — Six permutations of the subject-predicate-object triple (SPO, SOP, PSO, POS, OPS, OSP) for efficient knowledge graph queries.
+- **Full-text search (FTS5 or equivalent)** — Text search across grain content.
+- **Hash-chained audit trail** — Every write operation is logged in a hash chain for tamper-evident auditing.
+- **Crash recovery and reconciliation** — The store must survive unexpected termination without data corruption.
+- **Policy engine with compliance presets** — GDPR, HIPAA, SOX, and other regulatory frameworks.
+
+Start at Level 1, prove correctness with test vectors, then graduate to Level 2. Level 3 is for teams building production memory infrastructure.
+
+## Step-by-Step Level 1 Implementation
+
+Let us build a Level 1 Minimal Reader from scratch. The goal: given a blob of bytes (a `.mg` grain), parse it, expand compacted field names, validate the type, compute the SHA-256 content address, and verify it matches a claimed address.
+
+### Step 1: Parse the 9-Byte Header
+
+Every OMS blob starts with a fixed 9-byte header:
+
+```
+Byte 0:    Version (must be 0x01)
+Byte 1:    Flags (bit field)
+Byte 2:    Type (memory type enum: 0x01=Fact, 0x02=Episode, ..., 0x07=Goal)
+Bytes 3-4: Namespace hash (first 2 bytes of SHA-256(namespace), big-endian uint16)
+Bytes 5-8: Created-at (uint32 epoch seconds, big-endian)
+```
+
+Your parser should:
+1. Check that the blob is at least 10 bytes (9-byte header + minimum 1-byte payload).
+2. Verify byte 0 is `0x01`. If not, reject with `ERR_VERSION`.
+3. Extract the flags byte. The bits tell you about signing, encryption, compression, content refs, embedding refs, CBOR encoding, and sensitivity level.
+4. Extract the type byte. Values `0x01` through `0x07` are the seven standard memory types.
+5. Extract the namespace hash (bytes 3-4) and created-at timestamp (bytes 5-8).
+
+### Step 2: Decode the MessagePack Payload
+
+Bytes 9 onward are the canonical MessagePack payload. Use a MessagePack library to decode this into a map (dictionary/object).
+
+The payload MUST decode to a map. If it decodes to any other type, reject with `ERR_NOT_MAP`.
+
+### Step 3: Reverse Field Compaction
+
+The decoded map uses short keys. Replace them with full names:
+
+```
+"t"     → "type"
+"s"     → "subject"
+"r"     → "relation"
+"o"     → "object"
+"c"     → "confidence"
+"st"    → "source_type"
+"ca"    → "created_at"
+"ns"    → "namespace"
+"adid"  → "author_did"
+"ctx"   → "context"
+...
+```
+
+The full mapping is in Section 6 of the spec. Unknown keys are preserved as-is — this is how OMS achieves forward compatibility with future spec versions.
+
+<Callout type="info">
+Nested compaction applies only to three fields: `content_refs`, `embedding_refs`, and `related_to`. Their inner maps also use short keys. Other array-of-maps fields like `provenance_chain` and `history` are NOT compacted recursively.
+</Callout>
+
+### Step 4: Validate the Type Field
+
+After decompaction, check that the `type` field exists. If absent, reject with `ERR_NO_TYPE`. The value must be one of: `"fact"`, `"episode"`, `"checkpoint"`, `"workflow"`, `"tool_call"`, `"observation"`, or `"goal"`.
+
+For unknown type values, a Level 1 reader deserializes the grain as an opaque map without schema validation — it does not reject the grain.
+
+### Step 5: Compute SHA-256 Over the Entire Blob
+
+The content address is the SHA-256 hash of the **complete blob bytes** — header plus payload. Not just the payload. The header is part of the hashed content.
+
+```python
+import hashlib
+content_address = hashlib.sha256(blob_bytes).hexdigest()
+```
+
+The result is a 64-character lowercase hexadecimal string.
+
+### Step 6: Use Constant-Time Comparison for Hash Verification
+
+When verifying that a computed content address matches a claimed one, do not use `==`. Use a constant-time comparison function:
+
+```python
+import hmac
+is_valid = hmac.compare_digest(expected_hash, computed_hash)
+```
+
+```go
+import "crypto/subtle"
+isValid := subtle.ConstantTimeCompare([]byte(expected), []byte(computed)) == 1
+```
+
+```javascript
+import crypto from "crypto";
+const isValid = crypto.timingSafeEqual(
+  Buffer.from(expected), Buffer.from(computed)
+);
+```
+
+## Verifying with Test Vector 1
+
+The spec provides Vector 1 as a complete byte-level reference. Let us walk through it.
+
+**Input (a minimal Fact grain):**
+
+```json
+{
+  "type": "fact",
+  "subject": "user",
+  "relation": "prefers",
+  "object": "dark mode",
+  "confidence": 0.9,
+  "source_type": "user_explicit",
+  "created_at": 1768471200000,
+  "namespace": "shared",
+  "author_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+}
+```
+
+**Expected content address:**
+
+```
+3288d0d41cf49a1d428e404f0b6a6fe60388be9536937557f6139b813d53a520
+```
+
+**The complete blob is 159 bytes.** Here is the hex:
+
+```
+01 00 01 a4 d2 69 68 ba a0 89 a4 61 64 69 64 d9 38 64 69 64 3a 6b 65 79 3a
+7a 36 4d 6b 68 61 58 67 42 5a 44 76 6f 74 44 6b 4c 35 32 35 37 66 61 69 7a
+74 69 47 69 43 32 51 74 4b 4c 47 70 62 6e 6e 45 47 74 61 32 64 6f 4b a1 63
+cb 3f ec cc cc cc cc cc cd a2 63 61 cf 00 00 01 9b c1 19 01 00 a2 6e 73 a6
+73 68 61 72 65 64 a1 6f a9 64 61 72 6b 20 6d 6f 64 65 a1 72 a7 70 72 65 66
+65 72 73 a1 73 a4 75 73 65 72 a2 73 74 ad 75 73 65 72 5f 65 78 70 6c 69 63
+69 74 a1 74 a4 66 61 63 74
+```
+
+**Header breakdown (first 9 bytes):**
+
+- `01` — Version 1
+- `00` — Flags: all bits zero (public, MessagePack encoding, unsigned, no content refs, no embedding refs, no compression, no encryption)
+- `01` — Type: Fact (`0x01`)
+- `a4 d2` — Namespace hash: first 2 bytes of SHA-256("shared"), as uint16 big-endian
+- `69 68 ba a0` — Created-at: 1768471200 decimal = `0x6968baa0`, which is 2026-01-15T10:00:00Z in epoch seconds, big-endian
+
+**Payload breakdown (bytes 9 onward):**
+
+- `89` — MessagePack fixmap with 9 entries
+- Keys in lexicographic order: `"adid"`, `"c"`, `"ca"`, `"ns"`, `"o"`, `"r"`, `"s"`, `"st"`, `"t"`
+- Confidence `0.9` as float64: `cb 3f ec cc cc cc cc cc cd` (marker `cb` + 8 bytes IEEE 754 `3feccccccccccccd`)
+- Created_at `1768471200000` as uint64: `cf 00 00 01 9b c1 19 01 00`
+
+Parse these 159 bytes, compute SHA-256, and verify `3288d0d41cf49a1d428e404f0b6a6fe60388be9536937557f6139b813d53a520`.
+
+## Round-Trip Testing
+
+Section 22.6 of the spec defines the round-trip conformance test. This is the single most important test for a Level 2 implementation:
+
+1. Serialize a grain to blob bytes.
+2. Hash the blob to get a content address.
+3. Compare the content address against the expected test vector value.
+4. Deserialize the blob back into a grain object.
+5. Serialize again. The result MUST match the original blob bytes exactly.
+
+If step 5 produces different bytes, your implementation has a round-trip fidelity bug. Common causes: auto-inserting default values for absent fields, sorting arrays that should preserve insertion order, or failing to preserve unknown fields.
+
+## Implementation Libraries
+
+The spec provides a recommended library for each major language, along with the mechanism each uses for sorted keys:
+
+| Language | Library | Sorted Keys | Notes |
+|----------|---------|-------------|-------|
+| Python | `ormsgpack` | `OPT_SORT_KEYS` | Rust-backed, fastest option |
+| Python | `msgpack` | `sort_keys=True` | Pure Python fallback |
+| Rust | `rmp-serde` | Via `BTreeMap` | Natural ordering from data structure |
+| Go | `msgpack/v5` | Manual sorting | You are responsible for sorting keys |
+| JavaScript | `@msgpack/msgpack` | Pre-sort keys | Manual sorting required before encoding |
+| Java | `jackson-dataformat-msgpack` | `SORT_PROPERTIES_ALPHABETICALLY` | Feature flag on ObjectMapper |
+| C# | `MessagePack-CSharp` | Via `SortedDictionary` | Built-in support |
+
+<Callout type="warning">
+In Go and JavaScript, the library does NOT sort keys for you. You must sort the map keys lexicographically by UTF-8 bytes before passing them to the encoder. Missing this step is the most common cause of content address mismatches.
+</Callout>
+
+## String Normalization
+
+All strings — keys and values — must be NFC-normalized (Unicode Normalization Form Canonical Composition) before encoding. The spec provides library recommendations:
+
+- **Python:** `unicodedata.normalize("NFC", s)`
+- **Go:** `golang.org/x/text/unicode/norm` package
+- **JavaScript:** `String.prototype.normalize("NFC")`
+- **Java:** `java.text.Normalizer.normalize(s, Normalizer.Form.NFC)`
+
+NFC normalization ensures that characters like `e` + combining acute accent (`\u0301`) are collapsed to the precomposed form `\u00e9`. Without normalization, the two representations produce different bytes and different content addresses. Most ASCII text is already NFC, but non-ASCII characters in user names or descriptions require explicit normalization.
+
+## Common Pitfalls
+
+Based on the canonical serialization rules in Section 4, here are the bugs that trip up every first implementation:
+
+**1. Forgetting to sort keys.** Many languages preserve insertion order by default (Python dicts, JavaScript objects). MessagePack will faithfully encode keys in whatever order you provide them. If that order is not lexicographic, your content address will differ from every other implementation.
+
+**2. Using float32 instead of float64.** Some MessagePack libraries default to float32 when the value fits. OMS requires float64 always. A `confidence` value of `0.9` encoded as float32 produces 5 bytes (`ca 3f 66 66 66`). As float64, it produces 9 bytes (`cb 3f ec cc cc cc cc cc cd`). Same number, different bytes, different content address.
+
+**3. Not NFC-normalizing strings.** Most test strings are ASCII, so tests pass without normalization. The bug only surfaces when a user enters a combining character — and at that point, you have grains with incorrect content addresses in your store.
+
+**4. Including null values.** The spec requires null/None/nil map entries to be omitted entirely. If your serializer writes `"ctx": null` into the MessagePack output, the bytes change, the hash changes, and compatibility breaks.
+
+**5. Auto-inserting defaults on round-trip.** If your deserializer fills in `confidence: 0.0` for an absent field, and your serializer writes it back, you have injected a field that was not in the original blob. The round-trip test will fail.
+
+**6. Using non-canonical integer encoding.** The integer `42` must be encoded as a positive fixint (1 byte: `0x2a`), not as a uint8 (2 bytes: `0xcc 0x2a`). Both decode to `42`, but they produce different bytes.
+
+## Planning Your Implementation Path
+
+If you are starting from scratch, here is a practical roadmap:
+
+**Week 1: Level 1 reader.** Parse header, decode MessagePack, reverse field compaction, validate type, compute SHA-256. Verify against Vector 1.
+
+**Week 2: Canonical serializer.** Implement the 10-step serialization algorithm from Section 4.9. Verify round-trip fidelity: serialize, hash, deserialize, serialize again — bytes must match.
+
+**Week 3: Schema validation + Store protocol.** Enforce required fields per memory type. Add `get`, `put`, `delete`, `list`, `exists`.
+
+**Week 4: Invalidation policy.** Implement `supersede`, enforce `invalidation_policy`, handle fail-closed for unknown modes.
+
+At the end of week 4, you have a Level 2 implementation. Level 3 — encryption, hexastore indexing, full-text search, audit trails — depends on your storage backend and compliance requirements.
+
+<Callout type="success">
+The single most important validation step: take the Vector 1 input JSON, serialize it through your implementation, and check that you get the content address `3288d0d41cf49a1d428e404f0b6a6fe60388be9536937557f6139b813d53a520` from a 159-byte blob. If that matches, your canonical serialization is correct.
+</Callout>
+
+## Conclusion
+
+Building an OMS implementation is not about implementing the entire spec at once. Start with Level 1 — reading and verifying grains — then layer writing, schema validation, and store operations as your needs grow. The test vectors are your guardrails. The library table tells you which tools to use. The common pitfalls tell you what to watch for. The rest is engineering.

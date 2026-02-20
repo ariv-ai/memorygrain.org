@@ -1,0 +1,297 @@
+---
+title: "Memory Type Deep Dive: Observation — Sensor Readings, Cognitive Percepts, and Environmental Measurements"
+description: "How OMS Observation grains capture high-volume data from physical sensors, AI cognitive agents, and human observers — with spatial context, temporal alignment, and multi-modal content references."
+date: "2026-02-19"
+readTime: "13 min read"
+tags: ["memory-types", "observations", "sensors", "iot", "robotics"]
+---
+
+A robot sweeping a warehouse generates thousands of LiDAR points per second. A fleet of IoT sensors reports temperature, humidity, and pressure every few seconds. An autonomous vehicle fuses camera frames, radar returns, and IMU readings at different rates. An AI cognitive agent perceives patterns in a data stream and records what it noticed. A human inspector records a visual assessment of a weld seam. All of these produce a common pattern: high-volume, time-critical data from diverse observers.
+
+The Open Memory Specification defines a dedicated memory type for this pattern: **Observation**. Described in Section 8.6 of the OMS specification, an Observation grain records a measurement or percept from any kind of observer — physical sensors, AI cognitive agents, or humans. OMS v1.1 generalizes the observer model with the `observer_id` and `observer_type` fields (replacing the v1.0 `sensor_id` and `sensor_type` names, which remain as deprecated read-only aliases until v2.0).
+
+This post covers the Observation schema, its spatial and temporal alignment fields, how content references connect grains to raw data, and why the default importance is set low.
+
+## What Is an Observation Grain?
+
+An Observation grain is a **measurement or percept from any kind of observer** — a physical sensor, an AI cognitive agent, or a human. It is designed for high-volume, time-critical data with spatial context. Where a Fact grain records structured knowledge (`"server-room" "has_temperature" "22.5C"` with confidence 0.95), an Observation grain records the raw measurement event: which observer, what type, what was observed, when, and in what coordinate frame.
+
+The distinction matters. Facts are knowledge claims with confidence scores and temporal validity windows. Observations are measurement events with observer identity and spatial metadata. A system might generate thousands of Observation grains per second from a LiDAR scanner, then consolidate them into a handful of Fact grains that describe the environment. An AI agent might record cognitive observations about patterns it detects in incoming data. The two types serve different stages of the data pipeline.
+
+In the OMS header, Observation grains carry type byte `0x06`. Like all OMS types, this enables header-level filtering — a system processing a stream of `.mg` blobs can identify all Observation grains by reading a single byte at offset 2.
+
+## Required Fields
+
+An Observation grain requires only four fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Must be `"observation"` |
+| `observer_id` | non-empty string | Unique identifier for the observer (sensor, agent, or human) |
+| `observer_type` | non-empty string | Kind of observer (e.g., `"lidar"`, `"camera"`, `"imu"`, `"gps"`, `"temperature"`, `"cognitive_agent"`, `"human"`) |
+| `created_at` | int64 (epoch ms) | When the reading was taken |
+
+Notice what is required and what is not. The `observer_id` and `observer_type` are mandatory because an observation without observer identity is meaningless — you need to know which entity produced the reading and what kind of reading it is. But `subject`, `object`, and `confidence` are all optional. A raw LiDAR scan might not have a human-readable "subject" or "object" at all — it is a point cloud, not a semantic statement.
+
+The `observer_type` field uses plain strings, not an enum. The spec provides examples — `"lidar"`, `"camera"`, `"imu"`, `"gps"`, `"temperature"`, `"cognitive_agent"`, `"human"` — but the field is open to any observer type an application needs. The v1.0 field names `sensor_id` and `sensor_type` are accepted as deprecated read-only aliases (mapped to `observer_id` and `observer_type` on deserialization) and will be removed in v2.0.
+
+## Optional Fields
+
+Observation grains support a range of optional fields for richer context:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `subject` | string | Observed entity |
+| `object` | string | Observed value or summary |
+| `confidence` | float64, [0.0, 1.0] | Measurement confidence |
+| `frame_id` | string | Coordinate reference frame |
+| `sync_group` | string | Temporal alignment group |
+| `namespace` | string | Memory partition (default `"shared"`) |
+| `author_did` | string | DID of creating agent/system |
+| `importance` | float64, [0.0, 1.0] | Importance weight (default 0.3) |
+| `structural_tags` | array[string] | Classification tags |
+| `content_refs` | array[map] | References to raw data (point clouds, images) |
+| `context` | map (string to string) | Sensor-specific metadata |
+
+Several of these fields deserve detailed discussion.
+
+## The frame_id Field: Coordinate Reference Frames
+
+Physical-world data exists in coordinate frames. A LiDAR scanner reports points relative to its own mount position. A camera captures images in its own optical frame. A GPS receiver reports in a global geodetic frame. When multiple sensors contribute to a single understanding of the environment, their readings must be transformed into a common frame before they can be fused.
+
+The `frame_id` field records the coordinate reference frame in which the observation was made. Common values include:
+
+- `"base_link"` — the robot's body frame
+- `"world"` — a fixed world frame
+- `"camera_optical"` — the camera's optical center frame
+- `"map"` — a SLAM-generated map frame
+- `"odom"` — the odometry frame
+
+This field is a simple string, not a transform matrix. The actual coordinate transforms live in the system's transform tree (e.g., a ROS tf2 tree). The `frame_id` tells consumers which frame to look up when interpreting the observation's spatial data.
+
+<Callout type="info">
+The `frame_id` field uses the same naming conventions as ROS (Robot Operating System) tf frames, making OMS Observation grains directly compatible with robotic systems that already use frame-based spatial reasoning.
+</Callout>
+
+## The sync_group Field: Multi-Sensor Temporal Alignment
+
+When multiple sensors capture data simultaneously, their readings need to be aligned in time. A robot might have a camera and a LiDAR that both trigger at the same physical moment, but their data arrives at different times and is processed independently.
+
+The `sync_group` field is a string identifier that groups observations taken at the same physical moment. All Observation grains sharing the same `sync_group` value are understood to represent the same temporal snapshot of the environment.
+
+For example, a sensor fusion system might assign `sync_group: "capture_1737000000000"` to all sensors that triggered at timestamp 1737000000000. Later, a processing pipeline can query for all observations in that sync group to perform sensor fusion — combining the LiDAR point cloud, camera image, and IMU reading into a unified perception.
+
+The field compaction key for `sync_group` is `sg`, keeping the serialized representation compact even in high-volume scenarios.
+
+## Test Vector: A Temperature Observation
+
+Section 21.5 of the OMS specification provides a concrete test vector for an Observation grain. This is the canonical example — implementations can use it to verify their serialization:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "temp-sensor-01",
+  "observer_type": "temperature",
+  "subject": "server-room",
+  "object": "22.5C",
+  "confidence": 0.99,
+  "created_at": 1737000000000,
+  "namespace": "monitoring",
+  "importance": 0.3,
+  "author_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+}
+```
+
+This grain records a temperature sensor (`temp-sensor-01`) reading 22.5 degrees Celsius in a server room, with 0.99 confidence, in the `"monitoring"` namespace. The `importance` is 0.3 — the default for Observation grains.
+
+After field compaction, the keys become their short forms: `t` for type, `oid` for observer_id, `otype` for observer_type, `s` for subject, `o` for object, `c` for confidence, `ca` for created_at, `ns` for namespace, `im` for importance, `adid` for author_did. The compacted map is sorted lexicographically, serialized as canonical MessagePack, and prepended with the 9-byte header (version `0x01`, flags, type byte `0x06`, namespace hash from `SHA-256("monitoring")`, and `created_at` in epoch seconds).
+
+## Field Compaction Keys
+
+The Observation-specific compaction keys, defined in Section 6.6, are:
+
+| Full Name | Short Key | Type | Note |
+|-----------|-----------|------|------|
+| `observer_id` | `oid` | string | `sid` is a deprecated alias for `sensor_id` (v1.0) |
+| `observer_type` | `otype` | string | `stype` is a deprecated alias for `sensor_type` (v1.0) |
+| `frame_id` | `fid` | string | |
+| `sync_group` | `sg` | string | |
+
+These join the core compaction keys (`t`, `s`, `o`, `c`, `ca`, `ns`, `im`, `adid`, `tags`, `cr`, `ctx`, etc.) to form the complete set of short keys for an Observation grain. The compaction is bijective: serializers MUST replace full names with short keys, and deserializers MUST reverse the mapping. Deserializers encountering the deprecated short keys `sid` or `stype` MUST map them to `observer_id` and `observer_type` respectively.
+
+## Content References for Raw Sensor Data
+
+Many sensor observations reference large binary payloads that cannot be embedded directly in a grain. A LiDAR scan might be millions of points. A camera frame might be several megabytes. A thermal image might be a specialized binary format.
+
+OMS handles this through **content references** (Section 7). A grain's `content_refs` field is an array of maps, each describing an external resource by URI, modality, MIME type, size, checksum, and modality-specific metadata.
+
+### Point Cloud References
+
+For point cloud data — the bread and butter of LiDAR and depth sensors — the content reference metadata schema (Section 7.3) includes:
+
+```json
+{
+  "point_count": 1234567,
+  "format": "pcd_binary",
+  "has_color": true
+}
+```
+
+A complete content reference for a LiDAR scan might look like:
+
+```json
+{
+  "uri": "cas://sha256:a1b2c3d4...",
+  "modality": "point_cloud",
+  "mime_type": "application/x-pcd",
+  "size_bytes": 48000000,
+  "checksum": "sha256:a1b2c3d4...",
+  "metadata": {
+    "point_count": 1234567,
+    "format": "pcd_binary",
+    "has_color": true
+  }
+}
+```
+
+The `uri` uses a `cas://` (content-addressed storage) scheme, meaning the point cloud data itself is stored in a content-addressed store and retrievable by its hash. The `checksum` provides integrity verification independent of the storage layer.
+
+### Image References
+
+Camera observations reference image data:
+
+```json
+{
+  "uri": "cas://sha256:e5f6a7b8...",
+  "modality": "image",
+  "mime_type": "image/jpeg",
+  "size_bytes": 1048576,
+  "checksum": "sha256:e5f6a7b8...",
+  "metadata": {
+    "width": 1920,
+    "height": 1080,
+    "color_space": "sRGB"
+  }
+}
+```
+
+### Video References
+
+For continuous recording sensors:
+
+```json
+{
+  "uri": "cas://sha256:c9d0e1f2...",
+  "modality": "video",
+  "mime_type": "video/mp4",
+  "size_bytes": 52428800,
+  "checksum": "sha256:c9d0e1f2...",
+  "metadata": {
+    "width": 3840,
+    "height": 2160,
+    "fps": 30,
+    "duration_ms": 120000,
+    "codec": "h264"
+  }
+}
+```
+
+This design follows OMS Design Principle 1: **References, not blobs.** Multi-modal content is referenced by URI, never embedded in grains. The grain itself stays small and fast to serialize, while the raw data lives in an appropriate storage system.
+
+## The Default Importance of 0.3
+
+The Observation type has a default `importance` of 0.3. This is notably lower than the Fact type's default of 0.7. The reasoning is straightforward: observations are high-volume, and most are routine.
+
+A temperature sensor reporting 22.5C in a server room that normally runs at 22-23C is not noteworthy. A LiDAR scan of an empty warehouse aisle looks the same as the previous scan. The vast majority of sensor readings confirm the expected state of the world.
+
+The low default importance signals to downstream systems — memory consolidation engines, attention mechanisms, retrieval systems — that individual observations are not inherently important. A retrieval system querying for "important" memories should not be swamped by thousands of routine sensor readings.
+
+Of course, specific observations can override this default. An observation recording an anomalous temperature spike might set `importance: 0.9`. A camera observation capturing an unexpected object might set `importance: 0.8`. The default is a starting point, not a ceiling.
+
+<Callout type="warning">
+The `importance` field is a float64 in the range [0.0, 1.0]. While the default for Observation grains is 0.3, applications SHOULD override this for anomalous or safety-critical readings. A fire alarm sensor reading should not carry the same importance as a routine temperature check.
+</Callout>
+
+## The context Map: Sensor-Specific Metadata
+
+The `context` field is a map of string-to-string key-value pairs for sensor-specific metadata that does not fit into the standard fields. This might include:
+
+- Calibration parameters
+- Firmware version
+- Measurement units (when not implicit in `observer_type`)
+- Environmental conditions during measurement
+- Sensor-specific quality metrics
+
+For example, a GPS observation might include:
+
+```json
+{
+  "context": {
+    "hdop": "1.2",
+    "satellites": "12",
+    "fix_type": "rtk_fixed"
+  }
+}
+```
+
+The `context` map is compacted to `ctx` in serialization. Its entries are NOT recursively compacted — the string keys within `context` are preserved as-is, per Section 4.7 of the specification.
+
+## Industry Use Cases
+
+### Robotics
+
+Robotic systems generate continuous streams of sensor data from diverse sources: LiDAR scanners, stereo cameras, IMUs (Inertial Measurement Units), wheel encoders, force/torque sensors, and more. Each reading becomes an Observation grain with:
+
+- `observer_id` identifying the specific hardware device
+- `observer_type` classifying the measurement kind
+- `frame_id` recording the coordinate frame
+- `sync_group` aligning multi-sensor captures
+- `content_refs` pointing to raw data (point clouds, images)
+
+This creates a complete, reproducible record of everything the robot perceived. When a robot makes a mistake — collides with an object, misidentifies a part, navigates to the wrong location — the Observation grains from that time window provide the exact sensory input the robot was working with.
+
+### IoT Monitoring
+
+Industrial IoT deployments involve hundreds or thousands of sensors reporting at regular intervals. Temperature, humidity, pressure, vibration, flow rate, power consumption — each reading maps naturally to an Observation grain.
+
+The `namespace` field enables partitioning by facility, floor, or system. The `structural_tags` field enables classification by sensor category. The `importance` field (defaulting to 0.3) keeps routine readings from overwhelming retrieval systems, while anomalous readings can be flagged with higher importance.
+
+The test vector from Section 21.5 — `temp-sensor-01` reporting `22.5C` in a server room — is a direct example of this use case.
+
+### Autonomous Driving
+
+Autonomous vehicles are perhaps the most demanding use case for Observation grains. A self-driving car might run:
+
+- 6 cameras at 30 fps each = 180 image observations per second
+- 1 LiDAR at 10 Hz = 10 point cloud observations per second
+- 4 radars at 20 Hz = 80 radar observations per second
+- 1 IMU at 100 Hz = 100 inertial observations per second
+
+That is 370 observations per second, each needing sensor identity, temporal alignment, spatial context, and references to raw data. The `sync_group` field becomes critical here — grouping all sensors that captured data at the same physical moment for sensor fusion.
+
+The compact binary format of OMS grains (MessagePack serialization with field compaction) keeps the per-grain overhead low. The 9-byte fixed header enables fast filtering — scanning for all `0x06` type bytes to find observations, or using the namespace hash bytes (3-4) to route observations to the correct processing pipeline without deserializing payloads.
+
+### Industrial Inspection
+
+Defect detection in manufacturing relies on sensor observations — camera images of parts, ultrasonic thickness measurements, thermal imaging of welds. Each measurement is an Observation grain, and content references point to the raw inspection data.
+
+The `confidence` field records measurement certainty. The `structural_tags` field can classify observations by inspection type, product line, or defect category. The provenance chain tracks which inspection system, model, or operator produced the observation.
+
+## Observations in the Memory Graph
+
+Observation grains participate in the broader OMS memory graph:
+
+- **Fact derivation.** A consolidation engine might process thousands of temperature Observation grains and produce a single Fact grain: `"server-room" "average_temperature" "22.3C"` with `derived_from` pointing to the source observations.
+- **Goal satisfaction.** A Goal grain with criteria like `"server_room_temp < 25C"` can reference Observation grains in its `satisfaction_evidence` to prove the criteria were met.
+- **Episode context.** An Episode grain recording a maintenance event can reference Observation grains via `related_to` cross-links, connecting the narrative record to the raw sensor data that triggered the event.
+- **ToolCall inputs.** When an agent invokes a sensor processing tool, the ToolCall grain's `content_refs` might point to the same raw data as the Observation grain, creating a link between what was observed and what was done with the observation.
+
+## Summary
+
+The Observation memory type fills a specific niche in the OMS type system: high-volume, time-critical, spatially-contextual data from any kind of observer. Its minimal required fields (just `observer_id`, `observer_type`, and `created_at` beyond the mandatory `type`) keep per-grain overhead low. Its spatial fields (`frame_id`) and temporal alignment fields (`sync_group`) address the unique demands of multi-sensor and multi-observer systems. And its low default importance (0.3) acknowledges the fundamental truth of observational data: most readings are routine, and the system should not treat them as equally important to explicit knowledge claims.
+
+<Callout type="info">
+The Observation memory type is identified by type byte `0x06` in the OMS header. The Observation-specific field compaction keys are: `oid` (observer_id), `otype` (observer_type), `fid` (frame_id), and `sg` (sync_group). The deprecated v1.0 short keys `sid` (sensor_id) and `stype` (sensor_type) are accepted as read-only aliases until v2.0.
+</Callout>
+
+For the complete Observation schema, test vectors, and serialization rules, see [Section 8.6 of the OMS specification](https://github.com/openmemoryspec/oms).

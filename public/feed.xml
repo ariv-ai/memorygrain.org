@@ -1,0 +1,406 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Memory Grain Blog</title>
+    <link>https://memorygrain.org/blog/</link>
+    <description>Deep dives into the Open Memory Specification (.mg format) — COSE signing, header bytes, GDPR compliance, autonomous vehicles, IoT device profiles, and portability.</description>
+    <language>en-us</language>
+    <lastBuildDate>Fri, 20 Feb 2026 08:39:56 GMT</lastBuildDate>
+    <atom:link href="https://memorygrain.org/feed.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>OMS for Autonomous Vehicles: Structured Memory for Sensor Fusion, Decisions, and Audit</title>
+      <link>https://memorygrain.org/blog/agent-memory-autonomous-vehicles/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/agent-memory-autonomous-vehicles/</guid>
+      <description>How the Open Memory Specification maps to autonomous vehicle systems — from LiDAR and camera observations with sync groups and coordinate frames to navigation goals, actuator commands, and device profiles for edge-to-cloud processing.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>autonomous-vehicles</category>
+      <category>robotics</category>
+      <category>sensors</category>
+      <category>edge-computing</category>
+      <category>industry</category>
+    </item>
+    <item>
+      <title>Agent Memory for Customer Service: How OMS Captures, Structures, and Ports Support Knowledge</title>
+      <link>https://memorygrain.org/blog/agent-memory-customer-service/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/agent-memory-customer-service/</guid>
+      <description>Customer service AI agents lose context between sessions, across channels, and when switching platforms. The Open Memory Specification provides a structured memory model — Episodes for raw transcripts, Facts for customer knowledge, Goals for issue tracking, Workflows for escalation — with GDPR-ready PII handling and cross-platform portability via .mg files.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>customer-service</category>
+      <category>personalization</category>
+      <category>portability</category>
+      <category>industry</category>
+    </item>
+    <item>
+      <title>OMS for Education and Research: Knowledge Graphs, Citations, and Reproducibility</title>
+      <link>https://memorygrain.org/blog/agent-memory-education-research/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/agent-memory-education-research/</guid>
+      <description>How the Open Memory Specification maps to education and research — using Facts as knowledge graph triples, provenance chains as citation trails, Episodes for student interactions, Goals for learning objectives, embedding refs for semantic search, and content addressing for reproducible research.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>education</category>
+      <category>research</category>
+      <category>knowledge-graph</category>
+      <category>citations</category>
+      <category>industry</category>
+    </item>
+    <item>
+      <title>OMS for Financial Services: Audit-Ready Agent Memory for Trading, Compliance, and Risk</title>
+      <link>https://memorygrain.org/blog/agent-memory-financial-services/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/agent-memory-financial-services/</guid>
+      <description>How the Open Memory Specification maps to financial services — from trading signals and order execution to SOX-compliant audit trails, bi-temporal decision reconstruction, COSE-signed trade records, and regulatory compliance tags for PCI-DSS, Basel III, and Sarbanes-Oxley.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>finance</category>
+      <category>trading</category>
+      <category>compliance</category>
+      <category>sox</category>
+      <category>audit</category>
+      <category>industry</category>
+    </item>
+    <item>
+      <title>OMS for Healthcare: HIPAA-Compliant Agent Memory for Patient Data</title>
+      <link>https://memorygrain.org/blog/agent-memory-healthcare/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/agent-memory-healthcare/</guid>
+      <description>How the Open Memory Specification maps to healthcare AI — from patient observations and diagnoses to treatment plans, with PHI protection, HIPAA compliance mapping, per-patient encryption, selective disclosure, and bi-temporal queries for clinical audit.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>healthcare</category>
+      <category>hipaa</category>
+      <category>phi</category>
+      <category>compliance</category>
+      <category>industry</category>
+    </item>
+    <item>
+      <title>Agent Memory for Legal Technology: Tamper-Proof Records, Discovery, and Chain of Custody with OMS</title>
+      <link>https://memorygrain.org/blog/agent-memory-legal-tech/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/agent-memory-legal-tech/</guid>
+      <description>Legal AI agents must maintain tamper-proof records, support discovery, handle attorney-client privilege, and preserve chain of custody. The Open Memory Specification maps to these requirements through immutable grains, COSE signatures for authentication, selective disclosure for privilege, grain protection for litigation holds, and .mg files as evidence packages.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>legal</category>
+      <category>litigation</category>
+      <category>evidence</category>
+      <category>compliance</category>
+      <category>industry</category>
+    </item>
+    <item>
+      <title>Agent Memory for Manufacturing and Industrial IoT: Sensors, Predictive Maintenance, and Edge Intelligence</title>
+      <link>https://memorygrain.org/blog/agent-memory-manufacturing-iot/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/agent-memory-manufacturing-iot/</guid>
+      <description>Factories generate thousands of sensor readings per second. The Open Memory Specification maps this data to Observations for sensor telemetry, Facts for equipment knowledge, Workflows for learned SOPs, and Checkpoints for shift handoff — with device profiles from 512-byte microcontrollers to cloud-scale analytics.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>manufacturing</category>
+      <category>iot</category>
+      <category>sensors</category>
+      <category>edge-computing</category>
+      <category>industry</category>
+    </item>
+    <item>
+      <title>OMS for Robotics: Multi-Sensor Fusion, Spatial Context, and Mission Recovery</title>
+      <link>https://memorygrain.org/blog/agent-memory-robotics/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/agent-memory-robotics/</guid>
+      <description>How the Open Memory Specification maps to robotics systems — using Observation grains for multi-sensor fusion with coordinate frames and sync groups, Goal hierarchies for task decomposition, Checkpoints for state recovery, Workflows for manipulation skills, and device profiles from embedded MCUs to cloud planners.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>robotics</category>
+      <category>sensors</category>
+      <category>spatial</category>
+      <category>multi-sensor</category>
+      <category>industry</category>
+    </item>
+    <item>
+      <title>Anatomy of a .mg Blob</title>
+      <link>https://memorygrain.org/blog/anatomy-of-a-mg-blob/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/anatomy-of-a-mg-blob/</guid>
+      <description>A byte-by-byte walkthrough of the 9-byte fixed header and MessagePack payload that make up a memory grain binary blob, using the actual hex from OMS Test Vector 1.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>binary-format</category>
+      <category>header</category>
+      <category>technical</category>
+    </item>
+    <item>
+      <title>Auditable AI Provenance: Cross-Links and Derivation Trails in OMS</title>
+      <link>https://memorygrain.org/blog/auditable-ai-provenance-crosslinks/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/auditable-ai-provenance-crosslinks/</guid>
+      <description>How Section 14 of the Open Memory Specification enables full audit trails through provenance chains and typed cross-links — the derivation trail every grain carries, the closed vocabulary of 11 relation types, the critical normative note on &apos;replaces&apos;, and how grains form knowledge graphs with typed edges.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>provenance</category>
+      <category>cross-links</category>
+      <category>audit</category>
+      <category>knowledge-graph</category>
+    </item>
+    <item>
+      <title>Bi-Temporal Modeling in OMS: Five Timestamps, Full History</title>
+      <link>https://memorygrain.org/blog/bi-temporal-modeling/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/bi-temporal-modeling/</guid>
+      <description>OMS gives every memory grain five timestamps spanning two independent time axes — event time and system time. This bi-temporal model enables precise auditing, point-in-time reconstruction, and regulatory compliance without sacrificing immutability.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>temporal</category>
+      <category>bi-temporal</category>
+      <category>timestamps</category>
+      <category>audit</category>
+      <category>technical</category>
+    </item>
+    <item>
+      <title>Building Your First OMS Implementation: A Practical Guide</title>
+      <link>https://memorygrain.org/blog/building-first-oms-implementation/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/building-first-oms-implementation/</guid>
+      <description>A step-by-step guide to implementing the Open Memory Specification, from Level 1 Minimal Reader through Level 3 Production Store — with test vectors, library recommendations, and common pitfalls to avoid.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>implementation</category>
+      <category>conformance</category>
+      <category>getting-started</category>
+      <category>tutorial</category>
+    </item>
+    <item>
+      <title>Content Addressing with SHA-256: How Memory Grains Get Their Identity</title>
+      <link>https://memorygrain.org/blog/content-addressing-sha256-memory-identity/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/content-addressing-sha256-memory-identity/</guid>
+      <description>A deep dive into how OMS uses SHA-256 content addressing to give every memory grain a unique, verifiable, tamper-evident identity — covering the formula, the five roles of a content address, temporal uniqueness, and security considerations.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>content-addressing</category>
+      <category>sha-256</category>
+      <category>integrity</category>
+      <category>technical</category>
+    </item>
+    <item>
+      <title>Deterministic Serialization: How OMS Guarantees Identical Bytes</title>
+      <link>https://memorygrain.org/blog/deterministic-serialization/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/deterministic-serialization/</guid>
+      <description>A deep dive into the canonical serialization rules in Section 4 of the Open Memory Specification — key ordering, integer encoding, float constraints, NFC normalization, and the full 10-step algorithm that ensures two independent implementations always produce the same bytes.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>serialization</category>
+      <category>canonical</category>
+      <category>deterministic</category>
+      <category>technical</category>
+    </item>
+    <item>
+      <title>Device Profiles: Running OMS from Cloud Servers to Microcontrollers</title>
+      <link>https://memorygrain.org/blog/device-profiles/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/device-profiles/</guid>
+      <description>How the Open Memory Specification&apos;s three device profiles — Extended, Standard, and Lightweight — adapt the .mg format for everything from cloud servers with gigabytes of RAM to battery-powered microcontrollers with kilobytes.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>device-profiles</category>
+      <category>iot</category>
+      <category>edge-computing</category>
+      <category>microcontrollers</category>
+      <category>technical</category>
+    </item>
+    <item>
+      <title>Field Compaction: Shrinking Grains Without Losing Meaning</title>
+      <link>https://memorygrain.org/blog/field-compaction/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/field-compaction/</guid>
+      <description>How OMS maps human-readable field names to compact short keys for efficient binary storage — a complete guide to Section 6 of the Open Memory Specification, covering core fields, type-specific fields, compaction rules, and nested compaction boundaries.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>field-compaction</category>
+      <category>optimization</category>
+      <category>binary-format</category>
+      <category>technical</category>
+    </item>
+    <item>
+      <title>GDPR-Ready Agent Memory: Per-User Encryption, Crypto-Erasure, and Compliance Mapping</title>
+      <link>https://memorygrain.org/blog/gdpr-ready-agent-memory/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/gdpr-ready-agent-memory/</guid>
+      <description>How the Open Memory Specification addresses GDPR, CCPA, and HIPAA requirements through per-user encryption with HKDF-SHA256, crypto-erasure via key destruction, blind index lookups, and built-in compliance primitives mapped to specific regulatory articles.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>gdpr</category>
+      <category>compliance</category>
+      <category>privacy</category>
+      <category>encryption</category>
+      <category>security</category>
+    </item>
+    <item>
+      <title>Grain Protection: How Invalidation Policy Safeguards Critical Knowledge</title>
+      <link>https://memorygrain.org/blog/grain-protection-invalidation-policy/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/grain-protection-invalidation-policy/</guid>
+      <description>A comprehensive guide to Section 23 of the Open Memory Specification — the invalidation_policy field that declares who can remove a grain from trusted status. Covers all six protection modes, fail-closed semantics, goal laundering attacks, scope propagation, bypass path closures, and key separation requirements.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>grain-protection</category>
+      <category>invalidation-policy</category>
+      <category>safety</category>
+      <category>security</category>
+    </item>
+    <item>
+      <title>Memory Type Deep Dive: Checkpoints</title>
+      <link>https://memorygrain.org/blog/memory-type-checkpoints/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/memory-type-checkpoints/</guid>
+      <description>Checkpoints are agent state snapshots for save/restore in OMS — like a video game save point for AI agents. Learn about the Checkpoint memory type, its context map, plan and history fields, fault tolerance patterns, and the immutability model.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>memory-types</category>
+      <category>checkpoints</category>
+      <category>agent-state</category>
+    </item>
+    <item>
+      <title>Memory Type Deep Dive: Episodes</title>
+      <link>https://memorygrain.org/blog/memory-type-episodes/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/memory-type-episodes/</guid>
+      <description>Episodes are the raw, unstructured interaction records in OMS — the input to consolidation that extracts structured Facts. Learn about the Episode memory type, its fields, the consolidation pipeline, and real-world use cases.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>memory-types</category>
+      <category>episodes</category>
+      <category>interaction-records</category>
+    </item>
+    <item>
+      <title>Memory Type Deep Dive: Facts</title>
+      <link>https://memorygrain.org/blog/memory-type-facts/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/memory-type-facts/</guid>
+      <description>A comprehensive guide to the Fact memory type in OMS — the semantic triple model, required and optional fields, confidence scoring, bi-temporal validity, protected facts, consolidation levels, and real-world applications.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>memory-types</category>
+      <category>facts</category>
+      <category>knowledge-graph</category>
+      <category>semantic-triple</category>
+    </item>
+    <item>
+      <title>Memory Type Deep Dive: Goal — Lifecycle Semantics for Agent Objectives</title>
+      <link>https://memorygrain.org/blog/memory-type-goals/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/memory-type-goals/</guid>
+      <description>The most complex OMS memory type: Goal grains model explicit objectives with state machines, structured criteria, delegation, hierarchies, and protection against goal laundering.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>memory-types</category>
+      <category>goals</category>
+      <category>agent-objectives</category>
+      <category>lifecycle</category>
+    </item>
+    <item>
+      <title>Memory Type Deep Dive: Observation — Sensor Readings, Cognitive Percepts, and Environmental Measurements</title>
+      <link>https://memorygrain.org/blog/memory-type-observations/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/memory-type-observations/</guid>
+      <description>How OMS Observation grains capture high-volume data from physical sensors, AI cognitive agents, and human observers — with spatial context, temporal alignment, and multi-modal content references.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>memory-types</category>
+      <category>observations</category>
+      <category>sensors</category>
+      <category>iot</category>
+      <category>robotics</category>
+    </item>
+    <item>
+      <title>Memory Type Deep Dive: ToolCall — The Immutable Audit Trail for Agent Actions</title>
+      <link>https://memorygrain.org/blog/memory-type-toolcalls/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/memory-type-toolcalls/</guid>
+      <description>How OMS ToolCall grains record every tool invocation, argument, and result as an immutable, content-addressed record — enabling replay, debugging, cost tracking, and compliance.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>memory-types</category>
+      <category>tool-calls</category>
+      <category>audit</category>
+      <category>function-calling</category>
+    </item>
+    <item>
+      <title>Memory Type Deep Dive: Workflows</title>
+      <link>https://memorygrain.org/blog/memory-type-workflows/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/memory-type-workflows/</guid>
+      <description>Workflows are procedural memory in OMS — learned sequences of actions that agents can replay. Learn about the Workflow memory type, the trigger-steps model, how agents learn workflows, versioning through supersession, and industry use cases.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>memory-types</category>
+      <category>workflows</category>
+      <category>procedural-memory</category>
+    </item>
+    <item>
+      <title>MessagePack vs. CBOR: Choosing an Encoding for OMS Grains</title>
+      <link>https://memorygrain.org/blog/messagepack-vs-cbor/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/messagepack-vs-cbor/</guid>
+      <description>A technical comparison of the two encoding options in the Open Memory Specification — MessagePack (default) and CBOR (optional) — covering deterministic rules, key sorting differences, float encoding, content address implications, and when to use each.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>messagepack</category>
+      <category>cbor</category>
+      <category>encoding</category>
+      <category>technical</category>
+    </item>
+    <item>
+      <title>The .mg File Format: One File, Full Memory</title>
+      <link>https://memorygrain.org/blog/mg-file-format/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/mg-file-format/</guid>
+      <description>Section 11 of the OMS spec defines the .mg container — a portable binary file that packages any number of memory grains with a 16-byte header, random-access index, optional compression, and a SHA-256 footer checksum. This is how agent memory gets exported, shared, and archived.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>file-format</category>
+      <category>container</category>
+      <category>portability</category>
+      <category>technical</category>
+    </item>
+    <item>
+      <title>Migrating to OMS: A Practical Guide</title>
+      <link>https://memorygrain.org/blog/migrating-to-oms/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/migrating-to-oms/</guid>
+      <description>A step-by-step guide for migrating existing agent memory systems to the Open Memory Specification — mapping proprietary stores to OMS grain types, defining a namespace strategy, adopting conformance levels incrementally, and using the .mg file as the universal export format.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>migration</category>
+      <category>adoption</category>
+      <category>getting-started</category>
+      <category>architecture</category>
+    </item>
+    <item>
+      <title>Multi-Modal Memory: How OMS References Images, Audio, Video, and Embeddings</title>
+      <link>https://memorygrain.org/blog/multi-modal-memory/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/multi-modal-memory/</guid>
+      <description>A complete guide to Section 7 of the Open Memory Specification — content references, embedding references, modality-specific metadata, and the security model for linking grains to external multi-modal content without embedding blobs.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>multi-modal</category>
+      <category>content-references</category>
+      <category>embeddings</category>
+      <category>media</category>
+    </item>
+    <item>
+      <title>The Case for an Open Memory Standard</title>
+      <link>https://memorygrain.org/blog/open-standard-vendor-lockin/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/open-standard-vendor-lockin/</guid>
+      <description>Why agent memory locked in proprietary formats is a liability, how the Open Memory Specification&apos;s eight requirements and ten design principles solve the portability problem, and what OMS intentionally leaves out of scope.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>open-standard</category>
+      <category>portability</category>
+      <category>vendor-lock-in</category>
+      <category>architecture</category>
+    </item>
+    <item>
+      <title>Selective Disclosure: Field-Level Privacy for Memory Grains</title>
+      <link>https://memorygrain.org/blog/selective-disclosure/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/selective-disclosure/</guid>
+      <description>OMS lets you prove a fact exists without revealing its sensitive fields. Inspired by SD-JWT (RFC 9901), selective disclosure replaces chosen values with SHA-256 hashes — enabling GDPR-compliant sharing, inter-company collaboration, and court-admissible redaction at the grain level.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>privacy</category>
+      <category>selective-disclosure</category>
+      <category>compliance</category>
+      <category>security</category>
+    </item>
+    <item>
+      <title>Sensitivity Classification: Routing PII and PHI at the Header Level</title>
+      <link>https://memorygrain.org/blog/sensitivity-classification/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/sensitivity-classification/</guid>
+      <description>How the OMS v1.0 sensitivity classification system uses 2-bit header fields and structured tag vocabularies to enable O(1) routing of personally identifiable information and protected health information to appropriate storage tiers --- without deserializing the payload.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>sensitivity</category>
+      <category>classification</category>
+      <category>pii</category>
+      <category>phi</category>
+      <category>compliance</category>
+      <category>security</category>
+    </item>
+    <item>
+      <title>Signing Memory Grains: COSE Envelopes and Decentralized Identity</title>
+      <link>https://memorygrain.org/blog/signing-memory-grains-cose-dids/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/signing-memory-grains-cose-dids/</guid>
+      <description>OMS uses COSE Sign1 envelopes and W3C Decentralized Identifiers to provide cryptographic authenticity for memory grains — without certificate authorities, without centralized PKI, and without changing a grain&apos;s content address.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>cryptography</category>
+      <category>cose</category>
+      <category>did</category>
+      <category>signing</category>
+      <category>identity</category>
+      <category>security</category>
+    </item>
+    <item>
+      <title>What Is a Memory Grain?</title>
+      <link>https://memorygrain.org/blog/what-is-a-memory-grain/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/what-is-a-memory-grain/</guid>
+      <description>The memory grain is the atomic unit of agent knowledge in the Open Memory Specification. This post covers the seven memory types, the immutability model, content addressing, the .mg container capabilities, and the ten design principles that shape the format.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>memory-grain</category>
+      <category>fundamentals</category>
+      <category>architecture</category>
+    </item>
+    <item>
+      <title>Why AI Agents Need Persistent Memory</title>
+      <link>https://memorygrain.org/blog/why-ai-agents-need-persistent-memory/</link>
+      <guid isPermaLink="true">https://memorygrain.org/blog/why-ai-agents-need-persistent-memory/</guid>
+      <description>LLM context windows are not memory. Production agents need portable, verifiable, immutable knowledge that survives restarts, transfers between systems, and stands up to audit. Here is what persistent memory requires and why the Open Memory Specification exists.</description>
+      <pubDate>Thu, 19 Feb 2026 00:00:00 GMT</pubDate>
+      <category>memory</category>
+      <category>ai-agents</category>
+      <category>architecture</category>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,480 @@
+---
+title: "OMS for Robotics: Multi-Sensor Fusion, Spatial Context, and Mission Recovery"
+description: "How the Open Memory Specification maps to robotics systems — using Observation grains for multi-sensor fusion with coordinate frames and sync groups, Goal hierarchies for task decomposition, Checkpoints for state recovery, Workflows for manipulation skills, and device profiles from embedded MCUs to cloud planners."
+date: "2026-02-19"
+readTime: "12 min read"
+tags: ["robotics", "sensors", "spatial", "multi-sensor", "industry"]
+---
+
+Robots operate in physical environments where memory is not a convenience but a survival requirement. A warehouse robot that loses track of which shelf it was stocking mid-task, an assembly arm that forgets the torque specification after a power cycle, a search-and-rescue drone that cannot reconstruct its mission state after a communication blackout — these are not hypothetical failure modes. They are the everyday reality of deploying autonomous systems in the physical world.
+
+The challenges are distinct from those of purely digital AI agents. Robots deal with multiple sensors generating data simultaneously, spatial relationships grounded in coordinate frames, temporal alignment across sensor modalities, hierarchical task decomposition for complex manipulation, and the need to recover gracefully from interruptions. Every one of these maps directly onto capabilities defined in the Open Memory Specification.
+
+This post walks through how OMS v1.0 addresses each of these robotics challenges, with concrete grain examples drawn from the specification.
+
+## The multi-sensor fusion problem
+
+A mobile manipulation robot navigating a warehouse might carry a LiDAR scanner, stereo cameras, an IMU, GPS, force-torque sensors on its gripper, and tactile sensors on its fingertips. At any given moment, it needs to fuse readings from multiple sensors into a coherent picture of the world. This requires three things: knowing what type of sensor produced each reading, knowing which coordinate frame the reading is relative to, and knowing which readings were captured at the same instant.
+
+OMS addresses all three through the Observation memory type (Section 8.6).
+
+### Observation grains for sensor data
+
+The Observation type is designed specifically for high-volume, time-critical data with spatial context. Its required fields are deliberately minimal:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Must be `"observation"` |
+| `observer_id` | string | Unique identifier for the sensor instance |
+| `observer_type` | string | Type of sensor: "lidar", "camera", "imu", "gps", etc. |
+| `created_at` | int64 | Timestamp in epoch milliseconds |
+
+The `observer_type` field accepts any string, but the spec provides examples in Section 8.6: `"lidar"`, `"camera"`, `"imu"`, `"gps"`, `"temperature"`. For robotics, common additions include `"force_torque"` and `"tactile"`. The type byte in the fixed header is `0x06` (Observation), enabling O(1) filtering of sensor data without deserializing the payload.
+
+The default importance for Observations is `0.3` (Section 8.6) — the lowest of any memory type. This reflects the reality that individual sensor readings are high-volume, transient data. Most readings matter only in aggregate or during the brief window when they inform a decision.
+
+### Coordinate reference frames with frame_id
+
+This is where robotics memory diverges sharply from digital agent memory. Every sensor reading in a robotic system is relative to some coordinate frame. A LiDAR point cloud captured by a scanner mounted on the robot's head is in a different frame than a force reading from the wrist sensor. Fusing these readings requires knowing which frame each one lives in.
+
+The `frame_id` field (Section 8.6) provides this grounding:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "lidar-velodyne-01",
+  "observer_type": "lidar",
+  "created_at": 1768471200000,
+  "frame_id": "base_link",
+  "namespace": "robotics:arm-7",
+  "content_refs": [
+    {
+      "uri": "cas://sha256:a1b2c3d4...",
+      "modality": "point_cloud",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 4915200,
+      "checksum": "sha256:a1b2c3d4...",
+      "metadata": {"point_count": 1234567, "format": "pcd_binary", "has_color": true}
+    }
+  ]
+}
+```
+
+Standard coordinate frames in robotics map naturally to `frame_id` values:
+
+| frame_id | Meaning |
+|----------|---------|
+| `"base_link"` | Robot base frame — the platform's origin, typically at ground level center |
+| `"end_effector"` | Gripper or tool frame — where the robot interacts with objects |
+| `"world"` | Global reference frame — fixed in space, shared across robots |
+| `"camera_optical"` | Camera coordinate system — z-forward, x-right, y-down convention |
+
+This is critical for spatial reasoning. When a downstream fusion algorithm receives two Observation grains — one from a camera in `"camera_optical"` frame and one from a force sensor in `"end_effector"` frame — it knows exactly which transform chain to apply. Without `frame_id`, every consumer of sensor data would need to maintain its own lookup table mapping sensor IDs to coordinate frames.
+
+<Callout type="info">
+The `frame_id` field is optional in the spec (Section 8.6), meaning robotics systems use it while digital agents simply omit it. This is the "minimal required fields" design principle (Section 1.2, Principle 3) in action — optional fields extend the format for domain-specific use cases without burdening simpler implementations.
+</Callout>
+
+### Temporal alignment with sync_group
+
+When a robot captures LiDAR, camera, and IMU data at the same moment, all three readings need to be associated. The `sync_group` field (Section 8.6) provides this temporal alignment:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "camera-zed-left",
+  "observer_type": "camera",
+  "created_at": 1768471200000,
+  "frame_id": "camera_optical",
+  "sync_group": "capture-20260215-143022-001",
+  "content_refs": [
+    {
+      "uri": "cas://sha256:d4e5f6a7...",
+      "modality": "image",
+      "mime_type": "image/jpeg",
+      "size_bytes": 1048576,
+      "checksum": "sha256:d4e5f6a7...",
+      "metadata": {"width": 1920, "height": 1080, "color_space": "sRGB"}
+    }
+  ]
+}
+```
+
+Three Observation grains from the same capture instant — LiDAR, camera, and IMU — all share the same `sync_group` value: `"capture-20260215-143022-001"`. This enables downstream fusion algorithms to query: "give me all observations with sync_group X" and receive the complete set of temporally aligned readings. The alternative — matching by timestamp proximity — is brittle because different sensors have different latencies and clock skews.
+
+An IMU reading from the same capture:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "imu-bno085",
+  "observer_type": "imu",
+  "created_at": 1768471200000,
+  "frame_id": "base_link",
+  "sync_group": "capture-20260215-143022-001",
+  "context": {
+    "angular_velocity_x": "0.01",
+    "angular_velocity_y": "-0.02",
+    "angular_velocity_z": "0.005",
+    "linear_acceleration_x": "0.15",
+    "linear_acceleration_y": "9.81",
+    "linear_acceleration_z": "0.03"
+  }
+}
+```
+
+The `context` map (Section 8.6) carries sensor-specific metadata as string-to-string pairs. For compact sensors like IMUs, the readings fit directly in the context map. For large data like point clouds and images, the `content_refs` field references external storage.
+
+## Content references for rich sensor data
+
+Robotics systems generate data that ranges from a few bytes (IMU readings) to hundreds of megabytes (dense point clouds, high-resolution images). OMS handles this through content references (Section 7) — the grain references external content by URI without embedding it. Design Principle 1 from Section 1.2 states this explicitly: "References, not blobs — Multi-modal content (images, audio, video, embeddings) is referenced by URI, never embedded in grains."
+
+The content reference schema (Section 7.1) supports all the modalities a robot needs:
+
+**Point clouds** for 3D environment perception:
+```json
+{
+  "uri": "cas://sha256:a1b2c3d4...",
+  "modality": "point_cloud",
+  "mime_type": "application/octet-stream",
+  "checksum": "sha256:a1b2c3d4...",
+  "metadata": {"point_count": 1234567, "format": "pcd_binary", "has_color": true}
+}
+```
+
+The `modality` value `"point_cloud"` is listed explicitly in the spec (Section 7.1) alongside the metadata schema (Section 7.3), which defines `point_count`, `format`, and `has_color` as standard point cloud metadata fields.
+
+**3D meshes** for environment reconstruction:
+```json
+{
+  "uri": "cas://sha256:b2c3d4e5...",
+  "modality": "3d_mesh",
+  "mime_type": "model/gltf-binary",
+  "size_bytes": 15728640,
+  "checksum": "sha256:b2c3d4e5..."
+}
+```
+
+**Camera images** for visual perception:
+```json
+{
+  "uri": "cas://sha256:c3d4e5f6...",
+  "modality": "image",
+  "mime_type": "image/jpeg",
+  "size_bytes": 2097152,
+  "checksum": "sha256:c3d4e5f6...",
+  "metadata": {"width": 1920, "height": 1080, "color_space": "sRGB"}
+}
+```
+
+**Audio** for voice-commanded robots:
+```json
+{
+  "uri": "cas://sha256:e5f6a7b8...",
+  "modality": "audio",
+  "mime_type": "audio/wav",
+  "size_bytes": 960000,
+  "checksum": "sha256:e5f6a7b8...",
+  "metadata": {"sample_rate_hz": 48000, "channels": 2, "duration_ms": 15000}
+}
+```
+
+Each content reference includes a `checksum` field (SHA-256) for integrity verification. Section 20.5 requires that implementations verify this checksum after fetching and never auto-fetch during deserialization. For a robot, this means sensor data integrity is verifiable end-to-end: the Observation grain's content address proves the grain was not tampered with, and the content reference checksum proves the sensor data itself was not tampered with.
+
+<Callout type="security">
+When the `has_content_refs` flag (bit 3) is set in the header flags byte, consumers know before deserialization that external content is referenced. This supports efficient filtering — a system can scan grain headers to find all observations with associated sensor data without parsing payloads.
+</Callout>
+
+## Goal hierarchies for task decomposition
+
+A robot assembling a product does not execute a single monolithic action. It decomposes the task into a hierarchy of sub-goals, each with its own success criteria, priority, and state. OMS models this directly through the Goal memory type (Section 8.7).
+
+### DAG-based decomposition
+
+The `parent_goals` field is an array of content addresses, not a single parent pointer. This means goal hierarchies form a directed acyclic graph (DAG), not just a tree. A sub-goal like "Verify part alignment" might serve both "Assemble module A" and "Quality check module A" — two different parent goals.
+
+Here is a concrete decomposition:
+
+**Top-level goal:**
+```json
+{
+  "type": "goal",
+  "subject": "assembly-robot-01",
+  "description": "Assemble product X",
+  "goal_state": "active",
+  "source_type": "system",
+  "created_at": 1768471200000,
+  "priority": 1,
+  "namespace": "robotics:assembly-line-3"
+}
+```
+
+**Sub-goal — pick:**
+```json
+{
+  "type": "goal",
+  "subject": "assembly-robot-01",
+  "description": "Pick part A from bin 7",
+  "goal_state": "active",
+  "source_type": "agent_inferred",
+  "created_at": 1768471200100,
+  "priority": 2,
+  "parent_goals": ["<hash-of-assemble-product-x>"],
+  "criteria": ["gripper_holding_part_a == true", "part_a_orientation_error < 5_degrees"],
+  "criteria_structured": [
+    {
+      "metric": "gripper_holding_part_a",
+      "operator": "eq",
+      "threshold": 1,
+      "measurement_ns": "robotics:sensors"
+    }
+  ],
+  "provenance_chain": [
+    {
+      "source_hash": "<hash-of-assemble-product-x>",
+      "method": "goal_decomposition",
+      "weight": 1.0
+    }
+  ],
+  "namespace": "robotics:assembly-line-3"
+}
+```
+
+**Sub-goal — place:**
+```json
+{
+  "type": "goal",
+  "subject": "assembly-robot-01",
+  "description": "Place part A at location B",
+  "goal_state": "active",
+  "source_type": "agent_inferred",
+  "created_at": 1768471200200,
+  "priority": 2,
+  "parent_goals": ["<hash-of-assemble-product-x>"],
+  "criteria": ["part_a_at_location_b == true", "placement_error_mm < 0.5"],
+  "namespace": "robotics:assembly-line-3"
+}
+```
+
+**Sub-goal — fasten:**
+```json
+{
+  "type": "goal",
+  "subject": "assembly-robot-01",
+  "description": "Fasten with 5Nm torque",
+  "goal_state": "active",
+  "source_type": "agent_inferred",
+  "created_at": 1768471200300,
+  "priority": 2,
+  "parent_goals": ["<hash-of-assemble-product-x>"],
+  "criteria_structured": [
+    {
+      "metric": "applied_torque_nm",
+      "operator": "gte",
+      "threshold": 4.8,
+      "measurement_ns": "robotics:force_torque"
+    },
+    {
+      "metric": "applied_torque_nm",
+      "operator": "lte",
+      "threshold": 5.2,
+      "measurement_ns": "robotics:force_torque"
+    }
+  ],
+  "namespace": "robotics:assembly-line-3"
+}
+```
+
+Each sub-goal carries its own `criteria_structured` with machine-evaluable metrics (Section 8.7). The `criteria_structured` schema defines `metric`, `operator` (one of `"lt"`, `"gt"`, `"lte"`, `"gte"`, `"eq"`, `"neq"`), `threshold`, and optional `window_ms` and `measurement_ns` fields. The fasten sub-goal demonstrates how to express a range constraint — torque between 4.8Nm and 5.2Nm — using two structured criteria entries.
+
+The provenance chain on the "Pick part A" sub-goal uses `method: "goal_decomposition"` (Section 8.7, provenance chain methods table), which is the standard method string for agent-generated task breakdowns.
+
+### Multi-robot delegation
+
+In multi-robot systems, one robot may delegate sub-tasks to another. The `delegate_to` field carries the DID of the receiving agent:
+
+```json
+{
+  "type": "goal",
+  "subject": "assembly-robot-01",
+  "description": "Transport part C from warehouse to station 3",
+  "goal_state": "active",
+  "source_type": "agent_inferred",
+  "created_at": 1768471200400,
+  "parent_goals": ["<hash-of-assemble-product-x>"],
+  "delegate_to": "did:key:z6MkTransportBot42...",
+  "provenance_chain": [
+    {
+      "source_hash": "<hash-of-assemble-product-x>",
+      "method": "goal_delegation",
+      "weight": 1.0
+    }
+  ],
+  "namespace": "robotics:assembly-line-3"
+}
+```
+
+The `delegate_to` field is a DID (Section 8.7) — a W3C decentralized identifier — so delegation is cryptographically verifiable. The transport robot can verify that the delegation came from an authorized source. The provenance chain uses `method: "goal_delegation"`, another standard method string from the Goal-specific provenance table.
+
+Goal state transitions follow the immutable supersession model. When the "Pick part A" goal is completed, a new grain is created with `goal_state: "satisfied"` and `satisfaction_evidence` referencing the Observation or ToolCall grains that confirm success. The original active goal gets `superseded_by` set in the index layer, preserving the complete state transition history.
+
+## Checkpoints for robot state recovery
+
+When a robot loses power, crashes, or needs to hand off a task to another robot, it needs to save and restore its complete operational state. The Checkpoint memory type (Section 8.3) is designed exactly for this.
+
+```json
+{
+  "type": "checkpoint",
+  "context": {
+    "joint_positions": "[0.0, -1.57, 1.57, 0.0, 1.57, 0.0]",
+    "gripper_state": "closed",
+    "gripper_force_n": "12.5",
+    "current_task": "<hash-of-place-part-a-goal>",
+    "task_step": "3_of_5",
+    "environment_map_version": "map-v47-20260215",
+    "battery_level": "0.72",
+    "error_state": "none"
+  },
+  "created_at": 1768471200000,
+  "plan": [
+    "move_to_placement_location",
+    "align_part_with_fixture",
+    "release_gripper",
+    "verify_placement",
+    "retract_arm"
+  ],
+  "structural_tags": ["assembly", "checkpoint", "robot-01"]
+}
+```
+
+The `context` map captures the robot's complete state as string-to-string pairs: joint positions, gripper state, current task reference, environment map version. The `plan` field (array of strings) records the remaining steps. The `history` field (array of maps) can capture the actions already completed, providing a full before-and-after picture.
+
+On recovery, the robot loads the most recent Checkpoint grain, restores its state from the `context` map, and resumes from the current step in the `plan`. Because Checkpoints are immutable and content-addressed, the recovery process is deterministic — the same checkpoint always produces the same restored state.
+
+## Workflows for learned manipulation skills
+
+Robots learn procedural skills — sequences of actions triggered by specific conditions. The Workflow memory type (Section 8.4) captures these as reusable procedural memory:
+
+```json
+{
+  "type": "workflow",
+  "trigger": "object_detected_at_location",
+  "steps": [
+    "approach",
+    "pre_grasp",
+    "grasp",
+    "lift",
+    "verify_grasp"
+  ],
+  "created_at": 1768471200000,
+  "importance": 0.7,
+  "namespace": "robotics:manipulation-skills"
+}
+```
+
+The `trigger` field defines when this workflow activates — in this case, when an object is detected at a graspable location. The `steps` array defines the ordered sequence of actions. Both are required fields (Section 8.4).
+
+The default importance for Workflows is `0.7` (Section 8.4), higher than Observations (`0.3`) and Episodes (`0.5`). This reflects the value of learned procedural knowledge — a grasp sequence refined through experience is more important than any individual sensor reading.
+
+Workflows can be linked to specific Goals through cross-links (Section 14.2). A Goal grain with `related_to` pointing to a Workflow grain, using `relation_type: "depends_on"`, expresses that completing the goal requires executing the workflow. The `rollback_on_failure` field on Goal grains (Section 8.7) can reference Workflow grains to execute when a goal fails — enabling automated error recovery procedures.
+
+## Device profiles: from MCU to cloud
+
+A robotics system spans a wide range of computing environments. An actuator's embedded microcontroller has kilobytes of RAM. An onboard single-board computer like a Jetson or Raspberry Pi has megabytes. A cloud-based planning server has gigabytes. OMS defines three device profiles (Section 18) that match these tiers.
+
+### Lightweight profile — embedded MCUs on actuators
+
+- **Max blob size:** 512 bytes
+- **Max nesting depth:** 8 levels (Section 4.10)
+- **Hash function:** SHA-256 with hardware accelerator recommended
+- **Fields:** Required fields only — `type`, `subject`, `relation`, `object`, `confidence`, `created_at`, `namespace`
+- **Omitted:** `context`, `derived_from`, `provenance_chain`, `content_refs`, `embedding_refs`
+- **Encryption:** Transport-level only (DTLS/TLS)
+- **Deserialization:** Streaming recommended — no full blob in memory
+
+This profile is designed for sensors and actuators that need to produce or consume grains within tight memory constraints. A force-torque sensor on a gripper can emit Observation grains at 512 bytes — enough for `observer_id`, `observer_type`, `created_at`, and a few context values — while relying on transport-level encryption (DTLS for UDP, TLS for TCP) rather than per-grain encryption.
+
+### Standard profile — onboard SBCs
+
+- **Max blob size:** 32 KB
+- **Max nesting depth:** 16 levels
+- **Hash function:** SHA-256
+- **Fields:** All fields supported
+- **Encryption:** AES-256-GCM
+- **Vector search:** Optional
+
+The standard profile fits single-board computers like NVIDIA Jetson or Raspberry Pi that serve as the robot's onboard brain. These systems handle sensor fusion, local planning, and communication with both the lightweight MCUs below and the cloud above. The 32 KB blob limit accommodates rich Observation grains with full context maps and content references to locally stored sensor data.
+
+### Extended profile — cloud planning and analysis
+
+- **Max blob size:** 1 MB
+- **Max nesting depth:** 32 levels
+- **Hash function:** SHA-256
+- **Fields:** All fields supported
+- **Encryption:** AES-256-GCM
+- **Full feature set**
+
+Cloud-based systems handle fleet management, long-horizon planning, and historical analysis. The 1 MB blob limit and 32-level nesting depth support complex Goal hierarchies, rich provenance chains, and detailed Checkpoint states that capture the full operational context of a robot fleet.
+
+<Callout type="info">
+The three-tier device profile maps naturally to the robotics compute stack. Lightweight MCUs on actuators produce minimal grains with transport encryption. Onboard SBCs aggregate and enrich these grains. Cloud systems perform fleet-wide analysis with full-featured grains. All three tiers produce and consume the same OMS format — the grains are interoperable regardless of which profile generated them.
+</Callout>
+
+## Grain protection for safety constraints
+
+Safety constraints in robotics are non-negotiable. A rule like "never apply force greater than 50N near humans" must not be overridden by the robot's own reasoning, no matter how compelling the justification seems to an optimization algorithm.
+
+OMS handles this through the `invalidation_policy` field (Section 23):
+
+```json
+{
+  "type": "fact",
+  "subject": "assembly-robot-01",
+  "relation": "constraint",
+  "object": "never apply force > 50N near humans",
+  "confidence": 1.0,
+  "source_type": "user_explicit",
+  "created_at": 1768471200000,
+  "namespace": "robotics:safety",
+  "invalidation_policy": {
+    "mode": "locked",
+    "authorized": ["did:key:z6MkSafetyEngineer..."],
+    "scope": "lineage",
+    "protection_reason": "Human safety constraint — force limit near personnel"
+  }
+}
+```
+
+The `mode: "locked"` setting (Section 23.2) means no supersession or contradiction is permitted. The store MUST reject any attempt to override this grain with `ERR_INVALIDATION_DENIED`. The `scope: "lineage"` extends protection to all grains in the same supersession chain — even if someone creates a new grain that supersedes a derived grain, the protection propagates.
+
+Section 23.3 defines the fail-closed rule: unknown `mode` values are treated as `"locked"`. This means a future version of OMS could introduce new protection modes, and older implementations would default to the most restrictive behavior rather than silently accepting the override.
+
+Section 23.7 explicitly closes three bypass paths that a conformant store must prevent: contradiction flags, semantic replacement via `related_to: "replaces"`, and supersession chain injection. A robot agent cannot circumvent a safety constraint by any of these indirect methods.
+
+For safety constraints that might need updating by authorized personnel (not the robot), `mode: "delegated"` restricts supersession to specific DIDs listed in the `authorized` array. Only a safety engineer with the matching DID can update the force limit.
+
+## Putting it together: a pick-and-place mission
+
+Here is how the pieces fit together in a real scenario. A robot receives a task to pick an object from a shelf and place it in a bin.
+
+1. **Goal grain** creates the top-level objective with `goal_state: "active"` and `criteria_structured` defining success metrics.
+
+2. **Goal decomposition** creates sub-goals via `method: "goal_decomposition"` provenance — navigate to shelf, identify object, pick, navigate to bin, place, verify.
+
+3. **Observation grains** stream in from LiDAR (`frame_id: "base_link"`), cameras (`frame_id: "camera_optical"`), and IMU (`frame_id: "base_link"`), all sharing `sync_group` IDs for temporal alignment. Content references point to point clouds and images in external storage.
+
+4. **Checkpoint grains** save state at each major phase transition — after navigation, after grasp, after placement — enabling recovery if anything goes wrong.
+
+5. **Workflow grains** provide learned manipulation sequences triggered by conditions like `"object_detected_at_location"`.
+
+6. **Safety Facts** with `mode: "locked"` ensure force limits and collision avoidance constraints cannot be overridden.
+
+7. **Goal state transitions** record the outcome of each sub-goal as new immutable grains with `goal_state: "satisfied"` or `"failed"`, linked through the supersession chain.
+
+Every grain in this mission is immutable and content-addressed. The complete mission history — from initial task assignment through sensor fusion, decision-making, and execution — is a verifiable, auditable chain of grains. If a part was placed incorrectly, the provenance chain traces from the failed quality check back through every observation, goal decision, and workflow execution that led to the error.
+
+## Summary
+
+OMS maps to robotics naturally because the specification was designed with sensor data and spatial reasoning as first-class concerns. The Observation type's `observer_type`, `frame_id`, and `sync_group` fields address multi-sensor fusion directly. Goal hierarchies with DAG-structured `parent_goals` and `criteria_structured` handle task decomposition. Checkpoints capture robot state for recovery. Workflows encode procedural skills. Device profiles match the lightweight-to-cloud compute stack. And grain protection with `mode: "locked"` ensures safety constraints are enforced at the data layer, not just the application layer.
+
+The result is a memory format where every sensor reading, every decision, every safety constraint, and every task outcome is an immutable, verifiable, content-addressed grain — portable across robots, auditable by operators, and recoverable after failure.

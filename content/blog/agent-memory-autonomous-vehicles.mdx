@@ -1,0 +1,407 @@
+---
+title: "OMS for Autonomous Vehicles: Structured Memory for Sensor Fusion, Decisions, and Audit"
+description: "How the Open Memory Specification maps to autonomous vehicle systems — from LiDAR and camera observations with sync groups and coordinate frames to navigation goals, actuator commands, and device profiles for edge-to-cloud processing."
+date: "2026-02-19"
+readTime: "14 min read"
+tags: ["autonomous-vehicles", "robotics", "sensors", "edge-computing", "industry"]
+---
+
+An autonomous vehicle is a machine that must remember what it sensed, what it decided, and why it acted — across millions of data points per second, in conditions where a memory failure can have physical consequences. A single drive generates terabytes of LiDAR point clouds, camera frames, radar returns, and IMU readings. The vehicle's planning stack fuses this data, makes steering and braking decisions, and must be able to explain every one of those decisions to regulators, insurers, and accident investigators after the fact.
+
+The challenge for AV memory is not just volume. It is structure. A LiDAR scan taken at time T must be temporally aligned with the camera frame taken at the same physical moment. A braking decision must be traceable to the specific sensor readings that triggered it. A learned driving pattern — "slow down when approaching a school zone" — must be distinct from a transient observation and carry different lifecycle semantics. And all of this must work on hardware ranging from microcontrollers on sensor modules to GPU-equipped onboard computers to cloud-based post-processing clusters.
+
+The Open Memory Specification addresses these requirements through its seven memory types, device profiles, content references for large binary data, and the 9-byte fixed header that enables efficient filtering at every layer of the compute stack.
+
+## Observations: the sensor data backbone
+
+The Observation type (type byte `0x06`, Section 8.6) was designed for high-volume, time-critical sensor data with spatial context. Autonomous vehicles are the canonical use case.
+
+### LiDAR point clouds
+
+A LiDAR scan produces a point cloud — millions of 3D coordinates representing the vehicle's surroundings. The point cloud data is far too large to embed in a grain (a single scan can be tens of megabytes). Following OMS Design Principle 1 ("References, not blobs"), the Observation grain references the point cloud via a content reference:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "velodyne-vls128-roof",
+  "observer_type": "lidar",
+  "subject": "environment",
+  "object": "360-degree point cloud scan",
+  "confidence": 0.99,
+  "created_at": 1739900000000,
+  "namespace": "av:perception",
+  "frame_id": "base_link",
+  "sync_group": "sg-20260219-143022-001",
+  "content_refs": [
+    {
+      "uri": "cas://sha256:a1b2c3d4e5f6...",
+      "modality": "point_cloud",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 24117248,
+      "checksum": "sha256:a1b2c3d4e5f6...",
+      "metadata": {
+        "point_count": 1234567,
+        "format": "pcd_binary",
+        "has_color": true
+      }
+    }
+  ]
+}
+```
+
+The `metadata` field within the content reference follows the point cloud schema defined in Section 7.3: `point_count`, `format`, and `has_color`. The `checksum` field enables integrity verification — if the referenced file has been corrupted or tampered with, the SHA-256 mismatch is detected.
+
+### Camera frames
+
+Camera observations follow the same pattern with image-specific metadata:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "front-stereo-left",
+  "observer_type": "camera",
+  "subject": "forward-view",
+  "object": "Front camera frame - 3 pedestrians detected",
+  "confidence": 0.94,
+  "created_at": 1739900000000,
+  "namespace": "av:perception",
+  "frame_id": "camera_optical",
+  "sync_group": "sg-20260219-143022-001",
+  "content_refs": [
+    {
+      "uri": "cas://sha256:b2c3d4e5f6a7...",
+      "modality": "image",
+      "mime_type": "image/jpeg",
+      "size_bytes": 2097152,
+      "checksum": "sha256:b2c3d4e5f6a7...",
+      "metadata": {
+        "width": 1920,
+        "height": 1080,
+        "color_space": "sRGB"
+      }
+    }
+  ]
+}
+```
+
+The image metadata fields — `width`, `height`, `color_space` — match the image metadata schema from Section 7.3. The `object` field carries a human-readable summary of what was detected, while the actual image data lives at the referenced URI.
+
+### IMU and GPS readings
+
+Inertial measurement unit and GPS readings are compact enough to summarize in the grain's `object` field, with detailed telemetry in the `context` map:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "imu-main",
+  "observer_type": "imu",
+  "subject": "vehicle-dynamics",
+  "object": "accel_x=0.12 accel_y=-0.03 accel_z=9.81 gyro_x=0.001 gyro_y=0.002 gyro_z=-0.015",
+  "confidence": 0.99,
+  "created_at": 1739900000000,
+  "namespace": "av:dynamics",
+  "frame_id": "base_link",
+  "sync_group": "sg-20260219-143022-001"
+}
+```
+
+```json
+{
+  "type": "observation",
+  "observer_id": "gps-primary",
+  "observer_type": "gps",
+  "subject": "vehicle-position",
+  "object": "37.7749,-122.4194",
+  "confidence": 0.95,
+  "created_at": 1739900000000,
+  "namespace": "av:localization",
+  "frame_id": "world",
+  "sync_group": "sg-20260219-143022-001"
+}
+```
+
+### Coordinate frames and sync groups
+
+Two Observation-specific fields are essential for autonomous vehicles:
+
+**`frame_id`** (Section 8.6) specifies the coordinate reference frame for the sensor reading. In robotics, this is a well-established concept — different sensors have different mounting positions and orientations, and all readings must be transformed into a common frame for fusion. Common values:
+
+- `"base_link"` — the vehicle's body frame (origin at rear axle center)
+- `"world"` — a global reference frame (GPS coordinates, map frame)
+- `"camera_optical"` — the camera's optical frame (Z forward, X right, Y down)
+
+**`sync_group`** provides temporal alignment for multi-sensor readings. All sensors reading at the same physical moment share a `sync_group` identifier. In the examples above, the LiDAR scan, camera frame, IMU reading, and GPS position all share `sync_group: "sg-20260219-143022-001"`. This means a perception algorithm can query "give me all Observation grains with this sync group" to reconstruct the complete sensor state at a single instant.
+
+<Callout type="info">
+The `sync_group` field solves a fundamental problem in sensor fusion: temporal alignment. Different sensors operate at different frequencies — LiDAR at 10-20 Hz, cameras at 30 Hz, IMU at 100+ Hz. The sync group tags readings that were captured at the same physical moment, even if they arrive at different times in the processing pipeline.
+</Callout>
+
+## Checkpoints for mission state
+
+A Checkpoint grain (type byte `0x03`) captures the vehicle's complete operational state at a point in time. This is the AV equivalent of a game save — if the planning system crashes or needs to recover, it restores from the last Checkpoint.
+
+```json
+{
+  "type": "checkpoint",
+  "context": {
+    "position_lat": "37.7749",
+    "position_lon": "-122.4194",
+    "heading_deg": "45.2",
+    "speed_mps": "12.5",
+    "current_route": "route-sf-downtown-001",
+    "route_progress": "0.34",
+    "passengers": "2",
+    "battery_percent": "78",
+    "autonomy_mode": "level_4",
+    "next_waypoint": "waypoint-42"
+  },
+  "plan": [
+    "Continue on Market St for 800m",
+    "Turn right onto 3rd St",
+    "Arrive at destination in 4 minutes"
+  ],
+  "history": [
+    {"action": "lane_change_left", "timestamp": 1739899990000, "reason": "blocked_lane"},
+    {"action": "decelerate", "timestamp": 1739899995000, "reason": "approaching_intersection"}
+  ],
+  "created_at": 1739900000000,
+  "namespace": "av:mission"
+}
+```
+
+The `context` map captures everything needed to understand the vehicle's current state: position, heading, speed, route, passengers, charge level, and autonomy mode. The `plan` array holds the immediate planned actions. The `history` array records recent action history — what the vehicle did and why.
+
+## ToolCalls for actuator commands
+
+Every physical action the vehicle takes — steering, braking, acceleration — is an actuator command that can be recorded as a ToolCall grain (type byte `0x05`):
+
+```json
+{
+  "type": "tool_call",
+  "tool_name": "brake_controller",
+  "arguments": {
+    "deceleration_mps2": 3.5,
+    "reason": "pedestrian_detected",
+    "trigger_observation": "sha256:c4d5e6f7...",
+    "urgency": "emergency"
+  },
+  "result": {
+    "actual_deceleration_mps2": 3.4,
+    "response_time_ms": 12,
+    "abs_engaged": true,
+    "speed_after_mps": 0.0
+  },
+  "success": true,
+  "duration_ms": 2800,
+  "created_at": 1739900000000,
+  "namespace": "av:control",
+  "author_did": "did:key:z6MkVehiclePlanner..."
+}
+```
+
+The `arguments` map includes a `trigger_observation` field — the content address of the Observation grain that triggered the braking decision. This creates a direct, cryptographically verifiable link between sensor data and vehicle action. An accident investigator can follow the chain: Observation grain (pedestrian detected) triggered ToolCall grain (emergency braking) with measured result (vehicle stopped).
+
+Steering commands follow the same pattern:
+
+```json
+{
+  "type": "tool_call",
+  "tool_name": "steering_controller",
+  "arguments": {
+    "target_angle_deg": -15.3,
+    "reason": "lane_change",
+    "target_lane": "left"
+  },
+  "result": {
+    "actual_angle_deg": -15.1,
+    "maneuver_complete": true
+  },
+  "success": true,
+  "duration_ms": 3200,
+  "created_at": 1739900000000,
+  "namespace": "av:control"
+}
+```
+
+## Goals for navigation objectives
+
+Navigation objectives — destinations, safety constraints, passenger comfort targets — are Goal grains (type byte `0x07`) with lifecycle semantics:
+
+```json
+{
+  "type": "goal",
+  "subject": "vehicle-001",
+  "description": "Navigate to 123 Main St, San Francisco",
+  "goal_state": "active",
+  "source_type": "user_explicit",
+  "created_at": 1739900000000,
+  "priority": 2,
+  "criteria_structured": [
+    {
+      "metric": "distance_to_destination_m",
+      "operator": "lt",
+      "threshold": 10
+    }
+  ],
+  "namespace": "av:navigation",
+  "allowed_transitions": ["satisfied", "failed", "suspended"]
+}
+```
+
+Safety constraints use the Goal type with `invalidation_policy` to prevent modification:
+
+```json
+{
+  "type": "goal",
+  "subject": "vehicle-001",
+  "description": "Never exceed speed limit in school zones",
+  "goal_state": "active",
+  "source_type": "system",
+  "created_at": 1739900000000,
+  "priority": 1,
+  "namespace": "av:safety",
+  "invalidation_policy": {
+    "mode": "locked",
+    "protection_reason": "Safety-critical speed constraint in school zones"
+  }
+}
+```
+
+The `mode: "locked"` setting means no agent can supersede or contradict this grain. Section 23.2 specifies that any attempt to supersede a locked grain MUST be rejected with `ERR_INVALIDATION_DENIED`. The `allowed_transitions` field is deliberately absent here — on a protected goal without `allowed_transitions`, all state transitions are subject to the policy. The vehicle cannot autonomously mark this safety constraint as "satisfied" or "failed."
+
+<Callout type="security">
+Grain protection via `invalidation_policy` (Section 23) provides a formal mechanism for safety constraints that cannot be overridden by the planning agent. The fail-closed rule (Section 23.3) means unknown mode values are treated as `"locked"` — an implementation that encounters an unrecognized mode rejects the invalidation attempt rather than permitting it.
+</Callout>
+
+## Workflows for learned driving patterns
+
+The Workflow type (type byte `0x04`) captures procedural memory — learned sequences of actions that are triggered by specific conditions:
+
+```json
+{
+  "type": "workflow",
+  "trigger": "approaching_intersection",
+  "steps": [
+    "Check traffic signal state via perception",
+    "Reduce speed to intersection approach limit",
+    "Scan for pedestrians in crosswalks",
+    "Yield to oncoming traffic if turning left",
+    "Proceed through intersection when clear"
+  ],
+  "created_at": 1739900000000,
+  "namespace": "av:behavior",
+  "importance": 0.9
+}
+```
+
+Workflows are distinct from Goals in a critical way: a Workflow describes *how* to do something (procedural knowledge), while a Goal describes *what* to achieve (declarative objective). The vehicle might have a Goal "arrive at destination safely" and multiple Workflows that are activated along the route — "approaching_intersection", "merging_onto_highway", "navigating_parking_lot".
+
+## Facts for map knowledge
+
+Persistent map knowledge — traffic signal types, road characteristics, speed limits — can be modeled as Fact grains:
+
+```json
+{
+  "type": "fact",
+  "subject": "intersection_42",
+  "relation": "has_traffic_signal",
+  "object": "3-phase",
+  "confidence": 0.99,
+  "source_type": "imported",
+  "created_at": 1739900000000,
+  "namespace": "av:map",
+  "valid_from": 1735689600000
+}
+```
+
+The semantic triple model (`subject`-`relation`-`object`) maps naturally to map knowledge. The `valid_from` field records when this map knowledge became true — useful because traffic infrastructure changes over time. When a traffic signal is replaced or a road is reconfigured, a new Fact grain supersedes the old one through the supersession chain.
+
+## Device profiles: edge to cloud
+
+Section 18 defines three device profiles that map to the AV compute hierarchy:
+
+### Lightweight profile for edge MCUs
+
+**Target**: Microcontrollers on sensor modules, battery-powered edge nodes.
+
+- Maximum blob size: 512 bytes
+- Required fields only: `type`, `subject`, `relation`, `object`, `confidence`, `created_at`, `namespace`
+- Omit: `context`, `derived_from`, `provenance_chain`, `content_refs`, `embedding_refs`
+- Encryption: Transport-level only (DTLS/TLS)
+- Streaming deserialization recommended (no full-blob-in-memory)
+
+A sensor MCU might emit Observation grains with just the essential fields — sensor ID, type, reading, and timestamp. At 512 bytes maximum, these grains fit in the memory constraints of even modest microcontrollers. The SHA-256 hash can be computed with a hardware accelerator if available.
+
+### Standard profile for onboard SBCs
+
+**Target**: Single-board computers (NVIDIA Jetson, similar), the vehicle's main compute unit.
+
+- Maximum blob size: 32 KB
+- All fields supported
+- Encryption: AES-256-GCM
+- Vector search: optional
+
+The onboard computer handles sensor fusion, planning, and decision-making. It processes Observation grains from edge sensors, creates ToolCall grains for actuator commands, and maintains Checkpoint grains for state recovery. At 32 KB, grains can carry full content references, provenance chains, and cross-links.
+
+### Extended profile for cloud post-processing
+
+**Target**: Cloud servers for fleet analytics, training data pipelines, regulatory reporting.
+
+- Maximum blob size: 1 MB
+- Full feature set: all fields, AES-256-GCM encryption, vector search
+- Hash-chained audit trail
+
+After a drive is complete, all grains are uploaded to cloud storage for post-processing. Here, the Extended profile enables rich analysis: embedding references for similarity search across drives, full provenance chains for decision analysis, and comprehensive structural tags for fleet-wide analytics.
+
+<Callout type="info">
+The three device profiles are not different formats — they are different constraints on the same format. A Lightweight grain from an edge sensor is still a valid `.mg` blob. The Extended profile cloud system reads it without any conversion. This is the practical meaning of OMS Design Principle 2: "Additive evolution — new fields never break old implementations; parsers ignore unknowns."
+</Callout>
+
+## The 9-byte header for efficient sensor data routing
+
+The fixed 9-byte header (Section 3.1) is particularly valuable in AV systems where data volumes demand efficient filtering.
+
+```
+Byte 0: Version (0x01)
+Byte 1: Flags (sensitivity, compression, encryption, content refs)
+Byte 2: Type (0x06 = Observation)
+Bytes 3-4: Namespace hash (uint16 big-endian)
+Bytes 5-8: Created-at (uint32 epoch seconds)
+```
+
+The type byte at offset 2 enables O(1) filtering: a router can separate Observation grains from ToolCall grains, Goal grains from Checkpoint grains, by reading a single byte. No MessagePack deserialization required. In an AV processing pipeline that handles thousands of grains per second, this matters.
+
+The namespace hash (bytes 3-4) provides 65,536 routing buckets. A namespace like `"av:perception"` and `"av:control"` hash to different uint16 values, enabling fast routing to appropriate processing modules without examining the payload. The specification is clear (Section 3.1.1): this is a routing hint only, not a security mechanism. The full namespace string in the payload remains authoritative.
+
+The created-at timestamp (bytes 5-8) as uint32 epoch seconds enables time-range filtering at the header level — useful for extracting sensor data from a specific time window during accident investigation.
+
+## Audit trail for accident investigation
+
+Every decision an autonomous vehicle makes is traceable through the OMS provenance model.
+
+Consider a braking event during an accident investigation. The investigator can reconstruct the decision chain:
+
+1. **Observation grains** with the sync group from the moment of the event — LiDAR, camera, radar, IMU, all temporally aligned
+2. **ToolCall grains** for the braking command — what deceleration was requested, what was achieved, and the content address of the triggering Observation
+3. **Checkpoint grains** before and after the event — the vehicle's complete state, route, and speed
+4. **Goal grains** that were active at the time — what was the vehicle trying to achieve, and what safety constraints were in effect
+5. **Workflow grains** that were triggered — what behavioral procedure was the vehicle executing
+
+Each grain is immutable and content-addressed. The content address — the SHA-256 hash of the complete blob — proves integrity. If any byte has been modified, the hash will not match. If the grains were COSE-signed (Section 9), the investigator can verify exactly which software version or agent instance created each grain by resolving the `author_did` to its public key.
+
+The `provenance_chain` in each grain traces derivation. A ToolCall grain's arguments might reference specific Observation content addresses, creating a cryptographically verifiable link between sensor input and control output. Combined with the hash-chained audit log at the store level (Level 3 conformance, Section 17.3), this provides the kind of tamper-evident decision record that regulatory bodies require.
+
+NHTSA's event data recorder requirements are evolving to capture more data over longer pre-crash windows — the December 2024 final rule increased recording duration from 5 seconds at 2 Hz to 20 seconds at 10 Hz. OMS provides a structured, standardized format for this expanded data capture, where each sensor reading, decision, and action is a separate, content-addressed, verifiable grain rather than a proprietary binary dump.
+
+## From sensor to cloud: the complete picture
+
+The OMS architecture for autonomous vehicles spans the full compute stack:
+
+1. **Edge sensors** emit Lightweight-profile Observation grains at high frequency, using `sync_group` for temporal alignment and `frame_id` for spatial context
+2. **Onboard compute** fuses sensor data, creates Standard-profile ToolCall grains for actuator commands, maintains Checkpoint grains for state recovery, and enforces locked Goal grains for safety constraints
+3. **Cloud infrastructure** processes Extended-profile grains for fleet analytics, regulatory reporting, and training data extraction, with full provenance chains and hash-chained audit trails
+4. **Regulatory review** follows the content-addressed provenance chain from any decision back to the specific sensor readings that informed it
+
+The format is the same at every layer. A grain created by a microcontroller on a LiDAR module and a grain created by a cloud analytics pipeline are both valid `.mg` blobs, identified by SHA-256 content addresses, filterable by the 9-byte header, and portable in `.mg` container files. The device profiles constrain size and optional features, but the core format — the binary layout, the canonical serialization, the content addressing — is universal.
+
+This universality is what makes OMS viable for autonomous vehicles. The AV industry does not need another proprietary data format. It needs a standard that works from the sensor to the courtroom.

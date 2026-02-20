@@ -1,0 +1,326 @@
+---
+title: "Migrating to OMS: A Practical Guide"
+description: "A step-by-step guide for migrating existing agent memory systems to the Open Memory Specification — mapping proprietary stores to OMS grain types, defining a namespace strategy, adopting conformance levels incrementally, and using the .mg file as the universal export format."
+date: "2026-02-19"
+readTime: "14 min read"
+tags: ["migration", "adoption", "getting-started", "architecture"]
+---
+
+Most AI agents today store memory in proprietary formats. Vector databases hold embeddings alongside metadata. Key-value stores map identifiers to preferences. Conversation logs sit in SQL tables or JSON files. API call records accumulate in observability platforms. Configuration snapshots live in application state. None of these formats talk to each other, and none of them survive a platform switch intact.
+
+The Open Memory Specification (OMS) provides a path out of this fragmentation. But migration is not an all-or-nothing proposition. OMS defines three conformance levels (Section 17) specifically to enable incremental adoption --- you can start by reading grains before you commit to writing them. This post walks through the full migration process: inventorying what you have, mapping it to OMS grain types, defining a namespace strategy, implementing incrementally through conformance levels, and using the `.mg` file as the universal export format.
+
+## The starting point: scattered, proprietary memory
+
+Before mapping anything, take stock of what exists. Agent memory systems typically accumulate data across multiple stores, each with its own schema and access patterns:
+
+- **Vector databases** (Pinecone, Weaviate, Qdrant, Chroma) --- embeddings with associated metadata documents
+- **Key-value stores** (Redis, DynamoDB, etcd) --- user preferences, configuration, lookup tables
+- **Conversation logs** --- raw transcripts in SQL tables, Elasticsearch indices, or plain text files
+- **API call logs** --- tool invocations recorded in observability platforms or custom tables
+- **State snapshots** --- agent configuration and checkpoint data in JSON, YAML, or application state
+- **Procedural runbooks** --- documented workflows and automation sequences
+- **Sensor telemetry** --- IoT readings, monitoring metrics, environmental measurements
+- **Task tracking** --- objectives, goals, and their completion status in project management systems or custom stores
+
+Each of these maps to one or more of the seven OMS memory types. The mapping is not arbitrary --- it follows directly from the type definitions in Section 8 of the specification.
+
+## Mapping existing stores to OMS grain types
+
+### Vector DB entries become Fact grains with embedding_refs
+
+Vector database entries typically combine a text chunk or metadata document with an embedding vector stored for similarity search. In OMS, the knowledge becomes a Fact grain, and the embedding becomes an `embedding_refs` entry.
+
+Section 7.2 defines the embedding reference schema:
+
+```json
+{
+  "vector_id": "vec-12345",
+  "model": "text-embedding-3-large",
+  "dimensions": 3072,
+  "modality_source": "text",
+  "distance_metric": "cosine"
+}
+```
+
+The five fields capture everything needed to locate and use the vector: `vector_id` (the ID in your vector store), `model` (the embedding model name), `dimensions` (vector dimensionality), `modality_source` (what was embedded --- text, image, audio), and `distance_metric` (cosine, l2, or dot). The first three are required; the last two are optional.
+
+The key insight is that OMS does not embed vectors inside grains. Design Principle 1 --- "References, not blobs" --- means the grain references the vector by ID, and the vector continues to live in your vector store. The grain becomes the portable, verifiable metadata layer; the vector store remains the search engine.
+
+### Key-value stores become Fact grains
+
+Key-value pairs map naturally to the Fact type's semantic triple model: `subject` + `relation` form the key, and `object` is the value.
+
+```json
+{
+  "type": "fact",
+  "subject": "user",
+  "relation": "prefers",
+  "object": "dark mode",
+  "confidence": 0.95,
+  "source_type": "user_explicit",
+  "created_at": 1739980800000
+}
+```
+
+A Redis key like `user:preferences:theme` becomes subject="user", relation="prefers_theme", object="dark". A DynamoDB item with a partition key and sort key maps to subject and relation respectively. The confidence field adds something key-value stores lack --- a measure of how reliable the claim is. `source_type` records whether the value came from a user explicitly, was inferred by the agent, or was consolidated from multiple sources.
+
+### Conversation logs become Episode grains
+
+Raw conversation transcripts are Episodes --- the simplest grain type. Section 8.2 requires just three fields: `type`, `content`, and `created_at`.
+
+```json
+{
+  "type": "episode",
+  "content": "User asked about dark mode settings and was shown the preferences panel",
+  "created_at": 1739980800000
+}
+```
+
+Episodes are intentionally unstructured. They are the input to consolidation --- the process by which an agent extracts structured Facts from raw interactions. The optional `consolidated` boolean tracks whether an episode has been processed. You can migrate entire conversation histories as Episodes and then run consolidation to produce Facts, preserving the full provenance chain via `derived_from`.
+
+### API call logs become ToolCall grains
+
+Every tool invocation your agent makes --- API calls, function calls, database queries --- maps to a ToolCall grain. Section 8.5 captures the complete audit record:
+
+```json
+{
+  "type": "tool_call",
+  "tool_name": "web_search",
+  "arguments": {"query": "OMS specification"},
+  "result": {"hits": 42},
+  "success": true,
+  "duration_ms": 230,
+  "created_at": 1739980800000
+}
+```
+
+Required fields are `tool_name`, `arguments`, `result`, `success`, and `created_at`. Optional fields include `duration_ms` for execution time and `error` for failure messages. If your existing logs lack some of these fields, you can still migrate --- set `success` based on HTTP status codes, estimate `duration_ms` from log timestamps, and reconstruct `arguments` from request payloads.
+
+### Configuration snapshots become Checkpoint grains
+
+Agent state snapshots --- "where was I, what was I doing, what was my plan" --- are Checkpoints. Section 8.3 requires `type`, `context` (a map of the agent's current state), and `created_at`.
+
+```json
+{
+  "type": "checkpoint",
+  "context": {"current_task": "analyze_report", "step": 3, "model": "claude-3"},
+  "plan": ["validate_schema", "transform", "load"],
+  "history": [{"action": "fetch_data", "status": "complete"}],
+  "created_at": 1739980800000
+}
+```
+
+The `context` map is flexible --- it accepts any map structure as the agent state snapshot. If your current state snapshots are JSON objects, the migration is a direct mapping. The optional `plan` and `history` fields capture forward-looking actions and past actions respectively, enabling mission recovery when an agent restarts mid-task.
+
+### Procedural runbooks become Workflow grains
+
+Documented procedures --- "when X happens, do Y then Z" --- are Workflows. Section 8.4 requires `type`, `steps` (a non-empty array of strings), `trigger` (a non-empty string describing the activation condition), and `created_at`.
+
+```json
+{
+  "type": "workflow",
+  "steps": ["fetch_data", "validate_schema", "transform", "load"],
+  "trigger": "new CSV file uploaded",
+  "created_at": 1739980800000
+}
+```
+
+If your agent has learned procedures through trial and error or has them configured as automation rules, each one becomes a Workflow grain. The trigger-steps model captures what activates the workflow and what happens when it runs.
+
+### Sensor telemetry becomes Observation grains
+
+IoT readings, monitoring metrics, and environmental measurements are Observations. Section 8.6 requires `type`, `observer_id`, `observer_type`, and `created_at`:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "temp-sensor-01",
+  "observer_type": "temperature",
+  "subject": "server-room",
+  "object": "22.5C",
+  "confidence": 0.99,
+  "created_at": 1739980800000
+}
+```
+
+Observations support spatial context via `frame_id` (coordinate reference frame) and temporal alignment via `sync_group` (for correlating multi-sensor readings). The default importance is 0.3 --- lower than Facts (0.7) --- reflecting the high-volume, transient nature of sensor data.
+
+### Task tracking becomes Goal grains
+
+Objectives, OKRs, and task status records are Goals. Section 8.7 defines lifecycle semantics --- `active`, `satisfied`, `failed`, `suspended` --- with each state transition creating a new immutable grain in a supersession chain.
+
+```json
+{
+  "type": "goal",
+  "subject": "agent-007",
+  "description": "Reduce API latency below 100ms p99",
+  "goal_state": "active",
+  "source_type": "user_explicit",
+  "criteria": ["p99_latency_ms < 100", "error_rate < 0.001"],
+  "priority": 2,
+  "created_at": 1739980800000
+}
+```
+
+Goals exist as a dedicated type rather than being encoded as Facts because at scale, a dedicated type byte (0x07) enables O(1) header-level filtering before any MessagePack decode, and `goal_state` is a first-class indexable field.
+
+## Namespace strategy
+
+Before converting a single record, define how you will partition your grains. The `namespace` field (a string in the payload, defaulting to "shared") provides logical grouping. Bytes 3-4 of the 9-byte fixed header contain a namespace hash --- the first two bytes of SHA-256(namespace) encoded as uint16 big-endian --- providing 65,536 routing buckets that can be read without deserializing the payload.
+
+Map your existing organizational structure to namespaces:
+
+| Existing partition | OMS namespace |
+|-------------------|---------------|
+| User's personal data | `"personal"` |
+| Work-related knowledge | `"work"` |
+| Project-specific context | `"project:alpha"`, `"project:beta"` |
+| Robotics subsystems | `"robotics:arm-7"`, `"robotics:nav"` |
+| Per-customer data | `"customer:acme"`, `"customer:globex"` |
+| Shared/global knowledge | `"shared"` (default) |
+
+The colon-separated naming convention is not mandated by the spec, but it provides a natural hierarchy. The namespace hash in the header enables fast routing --- a store can direct grains to different shards, storage tiers, or access-control domains by reading two bytes at a fixed offset, without touching MessagePack at all.
+
+<Callout type="info">
+Migrate your existing categories, collections, or database partitions to namespaces. If your vector database uses separate collections for "work" and "personal" data, those become namespaces. If your SQL tables partition by customer ID, each customer becomes a namespace. The namespace string is the authoritative partition key; the header hash is a routing optimization.
+</Callout>
+
+## Incremental adoption through conformance levels
+
+OMS defines three conformance levels (Section 17), and they are designed to be adopted in order. You do not need to build a full production store on day one.
+
+### Start with Level 1: Minimal Reader
+
+Level 1 (Section 17.1) is read-only. A Level 1 implementation can:
+
+- Deserialize the version byte and canonical MessagePack payload
+- Compute and verify SHA-256 content addresses
+- Support field compaction (expanding short keys to full names)
+- Recognize all seven memory types
+- Ignore unknown fields (forward compatibility)
+- Use constant-time hash comparison
+
+Level 1 is sufficient for reading, verifying, and storing grains. This means your first step is not to convert your entire memory system --- it is to confirm that you can consume `.mg` grains produced by other systems. Build a reader, run it against the test vectors defined in Section 21, and verify that your content addresses match.
+
+This is the lowest-risk entry point. You are not changing your existing storage. You are adding the ability to read a new format.
+
+### Graduate to Level 2: Full Implementation
+
+Level 2 (Section 17.2) adds write capabilities. On top of all Level 1 requirements:
+
+- Serialize grains (full names to short keys via field compaction)
+- Enforce canonical MessagePack rules (lexicographic key ordering, NFC-normalized strings, null omission, minimum-size integer encoding, float64-only floating point)
+- Validate required fields per schema for each memory type
+- Pass all test vectors with round-trip fidelity
+- Support multi-modal content references
+- Implement the Store protocol (get/put/delete/list/exists)
+- Enforce `invalidation_policy` on all supersession and contradiction operations
+- Apply the fail-closed rule: unknown invalidation policy modes are treated as `locked`
+
+At Level 2, you can both read and write OMS grains. This is where the actual migration happens --- converting your existing records into canonical `.mg` blobs and writing them to an OMS-compliant store.
+
+### Then Level 3: Production Store
+
+Level 3 (Section 17.3) adds production-grade features on top of Level 2:
+
+- At least one persistent backend (filesystem, S3, database)
+- AES-256-GCM encrypted grain envelopes
+- Per-user key derivation (HKDF-SHA256)
+- Blind-index tokens for encrypted search
+- Hexastore index (SPO/SOP/PSO/POS/OPS/OSP) or equivalent
+- Full-text search (FTS5 or equivalent)
+- Hash-chained audit trail
+- Crash recovery and reconciliation
+- Policy engine with compliance presets
+
+Level 3 is for production systems that need encryption, compliance, and performance at scale. You do not need Level 3 to start migrating --- you need it when you are serving real users with regulatory requirements.
+
+## The .mg file: one file, full memory
+
+Section 11 defines the `.mg` container file --- the portable unit for full knowledge export. The file structure is simple:
+
+```
++----------+------------------+
+| Header   | Magic: "MG\x01"  |  3 bytes
+|          | Flags: uint8     |  1 byte
+|          | Grain count: u32 |  4 bytes
+|          | Field map ver: u8|  1 byte
+|          | Compression: u8  |  1 byte
+|          | Reserved: 6 bytes|  6 bytes
++----------+------------------+  = 16 bytes
+| Index    | Grain offsets    |  4 bytes x grain_count
++----------+------------------+
+| Grains   | grain 0 ... N-1  |  variable
++----------+------------------+
+| Footer   | SHA-256 checksum |  32 bytes
++----------+------------------+
+```
+
+The 16-byte header identifies the file, the offset index enables random access to any grain in O(1), the grains region contains all the actual data, and the 32-byte footer is a SHA-256 checksum over header + index + grains for integrity verification.
+
+This is the migration's output format. Once you have converted your existing records to OMS grains, you package them into a `.mg` file. That file can be imported by any OMS-compliant system --- regardless of what language it is written in, what platform it runs on, or what storage backend it uses. The recipient verifies the footer checksum, then verifies individual grain content addresses, and the import is complete.
+
+## The migration workflow
+
+Here is the step-by-step process:
+
+### Step 1: Inventory existing memory
+
+Document every store that holds agent memory. For each store, record the data format, the approximate volume, and what kind of knowledge it contains. You are building the migration map.
+
+### Step 2: Map to OMS grain types
+
+Using the mappings described above, assign each data source to one or more OMS types. A single source might produce multiple grain types --- a conversation log produces Episode grains directly and, after consolidation, Fact grains indirectly.
+
+### Step 3: Define namespace strategy
+
+Decide how your existing organizational boundaries map to OMS namespaces. Every grain defaults to the `"shared"` namespace if you do not specify one, but meaningful namespaces enable better routing, access control, and query scoping.
+
+### Step 4: Implement a Level 1 reader
+
+Build or adopt an OMS reader that can deserialize grains, verify content addresses, and expand field compaction. Test it against the spec's test vectors (Section 21). This confirms your implementation handles the binary format correctly before you start producing grains.
+
+### Step 5: Serialize existing data as .mg grains
+
+Write a migration script that reads from your existing stores and produces canonical `.mg` blobs. For each record: construct the grain map with the appropriate fields, serialize using canonical MessagePack (sorted keys, NFC strings, null omission, float64, minimum-size integers), prepend the 9-byte fixed header (version 0x01, flags, type byte, namespace hash, created_at seconds), and compute the SHA-256 content address over the complete blob.
+
+### Step 6: Verify with test vectors and round-trip testing
+
+Section 22.6 defines the round-trip testing procedure: serialize a grain to a blob, hash the blob to get the content address, compare against the expected test vector, deserialize the blob back to a grain, serialize again, and confirm the bytes match exactly. If the round-trip produces different bytes, your canonical serialization has a bug.
+
+### Step 7: Run a dual-write period
+
+Do not cut over instantly. Run a period where every new record is written to both the old format and as an `.mg` grain. This lets you verify that the two representations stay consistent, catch edge cases in production data that your test vectors did not cover, and build confidence in the new format before relying on it exclusively.
+
+### Step 8: Switch to .mg as primary store
+
+Once the dual-write period confirms parity, switch to `.mg` as the primary format. The old stores become the fallback, then the archive, then eventually decommissioned.
+
+<Callout type="success">
+The dual-write pattern is not just a safety net --- it is also a verification mechanism. If the OMS grains and the legacy records ever disagree, you have caught a migration bug before it affects production. The content-addressed nature of OMS grains makes this comparison deterministic: the same input must always produce the same content address.
+</Callout>
+
+## Forward compatibility: your implementation will not break
+
+Section 19.4 specifies three forward-compatibility rules that protect your migration investment:
+
+1. **Unknown fields** --- deserializers must preserve them during round-trip. If a future OMS version adds a `priority_weight` field to Facts, your v1.0 implementation will not lose it when reading, storing, and re-serializing the grain. The field passes through untouched.
+
+2. **Unknown types** --- if a future version defines type 0x08, your v1.0 implementation deserializes it as an opaque map. No schema validation is applied, but the grain is preserved and its content address remains verifiable.
+
+3. **Future version bytes** --- the only breaking change. If byte 0 is not `0x01`, reject with `ERR_VERSION` and include the version number in the error message so the user knows what happened.
+
+These rules mean that migrating to OMS v1.0 today does not lock you into v1.0 forever. As the spec evolves, your existing grains remain valid, your existing implementation remains functional, and new features are additive rather than breaking. Design Principle 2 --- "Additive evolution" --- ensures that new fields never break old implementations.
+
+## What you gain
+
+The migration is not trivial. Converting existing stores, ensuring canonical serialization, running dual-write verification --- this is real engineering work. What you gain in return:
+
+- **Portability** --- your agent's memory is no longer locked to a specific vendor, framework, or platform. A `.mg` file works anywhere.
+- **Verifiability** --- every grain's integrity is cryptographically proven by its SHA-256 content address. Every file's integrity is proven by its footer checksum.
+- **Interoperability** --- MessagePack libraries exist in 50+ languages (Section 22.1). Any language that can read MessagePack can read your grains.
+- **Compliance readiness** --- `user_id`, `namespace`, sensitivity classification, and structural tags are built into the format. When regulations apply, the fields are already there.
+- **Future-proofing** --- forward-compatibility rules ensure your v1.0 grains remain valid as the spec evolves. Unknown fields are preserved, unknown types are deserialized as opaque maps.
+
+The OMS specification is published under CC0 1.0 Universal (public domain) copyright with an Open Web Foundation Final Specification Agreement (OWFa 1.0) license. Anyone can implement it without royalties or restrictions. The format is the interchange layer; how you store, index, query, and serve grains is entirely your choice.

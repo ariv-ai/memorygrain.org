@@ -1,0 +1,288 @@
+---
+title: "What Is a Memory Grain?"
+description: "The memory grain is the atomic unit of agent knowledge in the Open Memory Specification. This post covers the seven memory types, the immutability model, content addressing, the .mg container capabilities, and the ten design principles that shape the format."
+date: "2026-02-19"
+readTime: "11 min read"
+tags: ["memory-grain", "fundamentals", "architecture"]
+---
+
+A memory grain is a single, immutable unit of agent knowledge — one fact, one episode, one observation, one decision record — encoded as a binary blob and identified by the SHA-256 hash of its contents. It is the atomic building block of the Open Memory Specification (OMS).
+
+The concept is straightforward: just as a git object stores a single commit, tree, or blob identified by its content hash, a memory grain stores a single piece of knowledge identified by its content address. Just as JSON became the universal interchange format for APIs, the `.mg` container is designed as the universal interchange format for agent memory.
+
+This post explains what a memory grain is, what it contains, why it is immutable, and how the ten design principles behind OMS shape every technical decision in the format.
+
+## The atomic unit of agent knowledge
+
+The OMS specification (Section 1.3) defines a memory grain as:
+
+> Atomic, indivisible unit of knowledge — one .mg blob (fact, episode, observation, etc.)
+
+"Atomic" means a grain cannot be partially read, partially trusted, or partially verified. It is a complete, self-contained record. The content address — a 64-character lowercase hexadecimal SHA-256 hash — is computed over the entire blob: the 9-byte fixed header followed by the canonical MessagePack payload.
+
+```
+content_address = lowercase_hex(SHA-256(complete_blob_bytes))
+```
+
+This content address serves five roles simultaneously (Section 5.4):
+
+- **Unique identifier** — the grain's filename in content-addressed stores
+- **Integrity check** — any byte change produces a different hash
+- **Deduplication key** — byte-identical content maps to the same address
+- **Provenance link** — derived grains reference source hashes
+- **Access key** — retrieve a grain from any store by its address
+
+Two agents on different continents, running different implementations, in different programming languages, that independently learn the same fact at the same timestamp will produce byte-identical blobs with the same content address. This is not a coincidence — it is a direct consequence of canonical serialization.
+
+## Seven memory types
+
+Every grain carries a `type` field indicating what kind of knowledge it represents. OMS v1.0 defines seven standard types, each with its own required and optional fields. The type is also encoded in byte 2 of the fixed header, enabling O(1) filtering without deserializing the payload.
+
+### Fact (0x01)
+
+A structured knowledge claim modeled as a semantic triple: subject-relation-object with confidence and temporal validity.
+
+```json
+{
+  "type": "fact",
+  "subject": "user",
+  "relation": "prefers",
+  "object": "dark mode",
+  "confidence": 0.9,
+  "source_type": "user_explicit",
+  "created_at": 1768471200000
+}
+```
+
+Facts are the core knowledge representation primitive. The subject-relation-object model maps naturally to knowledge graphs (RDF triples: `<grain:subject> <grain:relation> "grain:object" .`). Confidence scores range from 0.0 to 1.0, expressing how credible the claim is. Required fields: `type`, `subject`, `relation`, `object`, `confidence`, `source_type`, `created_at`.
+
+### Episode (0x02)
+
+A raw, unstructured interaction record. Episodes are the input to consolidation — the process of extracting structured Facts from unstructured text.
+
+```json
+{
+  "type": "episode",
+  "content": "User asked about dark mode settings",
+  "created_at": 1768471200000
+}
+```
+
+Episodes are intentionally minimal. Required fields are just `type`, `content`, and `created_at`. The optional `consolidated` boolean tracks whether the episode has been processed into structured knowledge.
+
+### Checkpoint (0x03)
+
+An agent state snapshot for save and restore. The `context` map captures the agent's current state; optional `plan` and `history` fields record planned actions and action history.
+
+```json
+{
+  "type": "checkpoint",
+  "context": {"current_task": "analyze_report", "step": 3},
+  "created_at": 1768471200000
+}
+```
+
+Checkpoints enable mission recovery — an agent that restarts mid-task can load the latest checkpoint and resume from a known state rather than starting from scratch.
+
+### Workflow (0x04)
+
+Procedural memory — a learned sequence of actions triggered by a specific condition.
+
+```json
+{
+  "type": "workflow",
+  "steps": ["fetch_data", "validate_schema", "transform", "load"],
+  "trigger": "new CSV file uploaded",
+  "created_at": 1768471200000
+}
+```
+
+Workflows capture how to do things, not what is true. Required fields: `type`, `steps` (non-empty array), `trigger` (non-empty string), `created_at`.
+
+### ToolCall (0x05)
+
+A record of a tool or function invocation and its result.
+
+```json
+{
+  "type": "tool_call",
+  "tool_name": "web_search",
+  "arguments": {"query": "OMS specification"},
+  "result": {"hits": 42},
+  "success": true,
+  "created_at": 1768471200000
+}
+```
+
+ToolCall grains provide a complete audit trail of what an agent did, what arguments it passed, what came back, and whether it succeeded. Optional fields include `duration_ms` for execution time and `error` for failure messages.
+
+### Observation (0x06)
+
+A measurement or percept from any kind of observer — physical sensor, AI cognitive agent, or human — designed for high-volume, time-critical data with spatial context.
+
+```json
+{
+  "type": "observation",
+  "observer_id": "temp-sensor-01",
+  "observer_type": "temperature",
+  "subject": "server-room",
+  "object": "22.5C",
+  "confidence": 0.99,
+  "created_at": 1768471200000
+}
+```
+
+Observations support autonomous vehicles, robotics, IoT, industrial monitoring, and AI cognitive perception. The `frame_id` field provides a coordinate reference frame, and `sync_group` enables temporal alignment across multi-observer readings. Default importance is 0.3 — lower than Facts (0.7) — reflecting the high volume and transient nature of observational data.
+
+### Goal (0x07)
+
+An explicit objective with lifecycle semantics. Goals have states — `active`, `satisfied`, `failed`, `suspended` — and each state transition creates a new immutable grain in a supersession chain.
+
+```json
+{
+  "type": "goal",
+  "subject": "agent-007",
+  "description": "Reduce API latency below 100ms p99",
+  "goal_state": "active",
+  "source_type": "user_explicit",
+  "criteria": ["p99_latency_ms < 100", "error_rate < 0.001"],
+  "priority": 2,
+  "created_at": 1768471200000
+}
+```
+
+Goals exist as a dedicated type rather than being encoded as Facts with `relation="has_goal"` for a specific reason: at scale, a dedicated type byte enables O(1) header-level filtering before any MessagePack decode, and `goal_state` is a first-class indexable field rather than metadata buried in a `context` map.
+
+<Callout type="info">
+The type byte also reserves ranges for future use: `0x08-0xEF` for future standard types, and `0xF0-0xFF` for application-defined types that extend the format for domain-specific needs.
+</Callout>
+
+## Immutability and supersession
+
+Grains are never modified. This is a hard invariant, not a convention. The content address is computed over the complete blob bytes — change any byte and you get a different hash, which means a different grain.
+
+When knowledge changes, OMS uses **supersession**: a new grain is written with a `derived_from` field pointing to the original grain's content address, and the index layer sets `superseded_by` on the predecessor.
+
+```
+Grain A:  subject="Alice", relation="works_at", object="Acme Corp"
+          content_address = abc123...
+
+Grain B:  subject="Alice", relation="works_at", object="Globex Inc"
+          derived_from = ["abc123..."]
+          content_address = def456...
+
+Index update: A.superseded_by = "def456..."
+```
+
+The original grain A is never touched. Its bytes remain the same, its hash remains valid, and it remains retrievable by content address. The supersession chain provides a complete history of knowledge evolution — invaluable for audit, debugging, and temporal queries.
+
+This model directly supports bi-temporal queries (Section 15):
+
+| Query | How |
+|-------|-----|
+| "What does the agent know now?" | Find grains where `system_valid_to` is absent |
+| "What was true on date X?" | Find grains where `valid_from <= X <= valid_to` |
+| "What did the agent know at time T?" | Find grains where `system_valid_from <= T` and `system_valid_to` is absent or &gt; T |
+| "Reconstruct state at audit time T" | Combine event-time and system-time queries |
+
+Each grain carries up to five timestamps to support this model: `created_at`, `valid_from`, `valid_to`, `system_valid_from`, and `system_valid_to`.
+
+## What the .mg container provides
+
+The Abstract of the OMS specification enumerates ten capabilities that the `.mg` container format delivers:
+
+### Deterministic serialization
+
+Identical content always produces identical bytes. This is achieved through canonical serialization rules (Section 4): lexicographic key ordering, NFC-normalized strings, null omission, minimum-size integer encoding, float64-only floating point, and strict array ordering. These rules eliminate ambiguity — there is exactly one valid byte sequence for any given grain.
+
+### Content addressing via SHA-256
+
+Every grain is identified by the SHA-256 hash (per [FIPS 180-4](https://csrc.nist.gov/publications/detail/fips/180/4/final)) of its complete blob bytes. The hash serves as identity, integrity check, deduplication key, provenance link, and access key simultaneously. SHA-256 provides 128-bit collision resistance — secure for the foreseeable future.
+
+<Callout type="info">
+The content address includes the `created_at_sec` timestamp from the fixed header (bytes 5-8). Two grains with identical semantic payload but different creation timestamps produce different content addresses. Creation time is part of grain identity.
+</Callout>
+
+### Compact binary encoding
+
+The default encoding is [MessagePack](https://msgpack.org/) — a binary serialization format supported across 50+ programming languages. Field compaction maps human-readable names to short keys (e.g., `confidence` becomes `c`, `source_type` becomes `st`), minimizing payload size. CBOR ([RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)) is available as an optional alternative, indicated by a flag bit in the header.
+
+### Cryptographic verification
+
+Optional COSE Sign1 envelopes ([RFC 9052](https://www.rfc-editor.org/rfc/rfc9052)) wrap the grain blob with a digital signature. EdDSA (Ed25519) is the default algorithm; ES256 (ECDSA P-256) is the alternative. The signature wraps the complete blob; the content address remains the inner blob's hash, unchanged by signing. Signing is optional — the `signed` flag in byte 1 of the header indicates whether the COSE wrapper is present.
+
+### Field-level privacy
+
+Selective disclosure, inspired by [SD-JWT (RFC 9901)](https://www.rfc-editor.org/rfc/rfc9901), allows sharing a grain with specific fields hidden. Hidden fields are replaced by SHA-256 hashes of their canonical MessagePack-encoded values, stored in an `_elided` map. The receiver can verify that elided fields exist (and match if the value is later revealed) without seeing the content. Not every field is elidable — `type`, `relation`, `confidence`, and `created_at` must always be visible.
+
+### Compliance primitives
+
+Every grain carries fields designed for regulatory compliance: `user_id` for GDPR data subject identification, `namespace` for logical partitioning, sensitivity classification in the header (public, internal, PII, PHI), and `structural_tags` with standardized prefixes (`pii:`, `phi:`, `reg:`, `sec:`, `legal:`). The per-user encryption pattern enables O(1) GDPR erasure through crypto-erasure.
+
+### Multi-modal references
+
+Images, audio, video, point clouds, 3D meshes, and embeddings are referenced by URI — never embedded in grains. Each content reference carries a URI, modality, MIME type, optional size and checksum, and modality-specific metadata. This follows design principle #1: **references, not blobs**.
+
+### Decentralized identity
+
+Agent identity uses [W3C Decentralized Identifiers (DIDs)](https://www.w3.org/TR/did-core/) rather than platform-specific agent IDs. `did:key` provides self-contained identity (public key in the DID itself, no external resolution needed). `did:web` provides organizational identity via DNS. The `author_did` field identifies who created a grain; `origin_did` tracks the original source in relay chains.
+
+### Grain protection
+
+The `invalidation_policy` field (Section 23) restricts who may supersede or contradict a grain. Six modes are defined: `open` (no restriction), `soft_locked` (requires justification), `locked` (no supersession permitted), `quorum` (requires multiple co-signers), `delegated` (only authorized DIDs), and `timed` (locked until a specified time). Unknown modes are treated as `locked` — a fail-closed design that prevents bypass through novel mode values.
+
+## The ten design principles
+
+OMS is not just a format — it is a set of engineering choices guided by ten explicit principles (Section 1.2). Understanding these principles explains why the format is shaped the way it is.
+
+### 1. References, not blobs
+
+Multi-modal content is referenced by URI, never embedded. A grain that describes an image observation contains a `content_refs` entry with the image URI, checksum, and metadata — not the image bytes. This keeps grains compact, hashable, and transferable regardless of the size of referenced content.
+
+### 2. Additive evolution
+
+New fields never break old implementations. Parsers must ignore unknown fields and preserve them during round-trip serialization. This guarantees that a grain written by a v1.1 implementation can be read by a v1.0 implementation — the unknown fields pass through untouched.
+
+### 3. Minimal required fields
+
+Each memory type defines only the essential fields. A Fact requires just seven fields: `type`, `subject`, `relation`, `object`, `confidence`, `source_type`, `created_at`. Everything else is optional. This means a simple knowledge claim and a richly annotated one with temporal validity, provenance chains, cross-links, and content references coexist in the same format without separate type hierarchies.
+
+### 4. Semantic triples
+
+The subject-relation-object model maps naturally to knowledge graphs. Every Fact is an RDF triple. This makes the transition from `.mg` grains to graph databases, SPARQL queries, or ontological reasoning a direct mapping rather than an impedance mismatch.
+
+### 5. Compliance by design
+
+Provenance, timestamps, user identity, and namespace are baked into every grain — not bolted on. A grain created in a development prototype carries the same compliance fields as one created in a production healthcare system. The fields may be empty in the prototype, but the schema is ready when regulation applies.
+
+### 6. No AI in the format
+
+The wire format is fully deterministic. There is no probabilistic component, no model inference, no prompt. LLMs produce grains and consume grains, but the format itself is as mechanistic as a TCP header. This is why the same grain serialized in Python and Rust produces identical bytes — there is no interpretation, only encoding rules.
+
+### 7. Index without deserialize
+
+The 9-byte fixed header exposes version, flags (signed, encrypted, compressed, content refs, embedding refs, encoding type, sensitivity), memory type, namespace hash, and creation timestamp — all at fixed byte offsets. A store can filter, route, and sort grains by reading nine bytes, without touching MessagePack at all.
+
+### 8. Sign without PKI
+
+W3C DIDs provide cryptographic identity without certificate authorities. A `did:key` is self-contained — the public key is encoded in the identifier itself. No certificate chain to validate, no CA to trust, no OCSP to query. For enterprise deployments, `did:web` provides organizational identity rooted in DNS.
+
+### 9. Share without exposure
+
+Selective disclosure enables sharing grains with restricted visibility. An HR system can share a grain proving "Alice works at ACME Corp" while hiding the `user_id` and `namespace` fields behind SHA-256 hashes. The receiver sees that these fields exist and can verify them later if the values are revealed, but cannot recover the hidden content from the hash alone.
+
+### 10. One file, full memory
+
+The `.mg` container file is the portable unit for full knowledge export. One file, with a 16-byte header, an offset index for random access, all grains in sequence, and a SHA-256 checksum footer. Copy the file, and you have copied the entire memory — verifiable, complete, and self-contained.
+
+<Callout type="success">
+The `.mg` file format mirrors familiar paradigms: `.sqlite` is a database file containing many rows; `.git` is a repository containing many objects; `.mg` is a memory file containing many grains.
+</Callout>
+
+## Putting it together
+
+A memory grain is simple in concept and precise in specification. It is one piece of knowledge, encoded deterministically, identified by its content hash, carrying its own provenance, compliance metadata, and temporal validity. It is never modified — only superseded. It is never locked to a platform — only addressed by its hash.
+
+The seven types cover the range of agent knowledge: declarative facts, raw interactions, state snapshots, procedural steps, tool invocations, sensor readings, and explicit objectives. The ten design principles ensure the format stays compact, interoperable, verifiable, and compliant.
+
+For the byte-level details of how a grain is actually encoded — the 9-byte header, the flags bitfield, the namespace hash, and the MessagePack payload — see [Anatomy of a .mg Blob](/blog/anatomy-of-a-mg-blob). For the broader context of why persistent memory matters for production AI agents, see [Why AI Agents Need Persistent Memory](/blog/why-ai-agents-need-persistent-memory).

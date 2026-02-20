@@ -1,0 +1,327 @@
+---
+title: "Sensitivity Classification: Routing PII and PHI at the Header Level"
+description: "How the OMS v1.0 sensitivity classification system uses 2-bit header fields and structured tag vocabularies to enable O(1) routing of personally identifiable information and protected health information to appropriate storage tiers --- without deserializing the payload."
+date: "2026-02-19"
+readTime: "12 min read"
+tags: ["sensitivity", "classification", "pii", "phi", "compliance", "security"]
+---
+
+A memory grain arrives at your storage layer. It might contain a user's email address. It might contain a medical diagnosis. It might contain the temperature reading from a server room sensor. Each of these demands different handling: PII needs encryption at rest, PHI needs HIPAA-compliant storage, and public sensor data can go anywhere.
+
+The question is: how do you know which is which without parsing the entire payload?
+
+Section 13 of the OMS v1.0 specification defines a sensitivity classification system that answers this question in two layers. The first layer is a 2-bit field in the fixed header --- readable in O(1) time without any deserialization. The second layer is a structured tag vocabulary in the payload that provides fine-grained classification. Together, these layers enable fast routing decisions at the infrastructure level while preserving detailed metadata for policy engines.
+
+## Header-Level Sensitivity: Two Bits, Four Levels
+
+Section 13.1 defines the sensitivity field as bits 6-7 of byte 1 (the flags byte) in the 9-byte fixed header:
+
+```
+Byte 1 (flags):
++---+---+---+---+---+---+---+---+
+| 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
++---+---+---+---+---+---+---+---+
+  |   |   |   |   |   |   |   |
+  |   |   |   |   |   |   |   +-- signed (COSE Sign1)
+  |   |   |   |   |   |   +------ encrypted (AES-256-GCM)
+  |   |   |   |   |   +---------- compressed (zstd)
+  |   |   |   |   +-------------- has_content_refs
+  |   |   |   +------------------ has_embedding_refs
+  |   |   +---------------------- cbor_encoding
+  +---+-------------------------- sensitivity (2 bits)
+```
+
+The two sensitivity bits encode four classification levels:
+
+| Binary | Value | Level | Meaning |
+|---|---|---|---|
+| `00` | 0 | Public | No sensitivity constraints |
+| `01` | 1 | Internal | Organization-internal data, not PII |
+| `10` | 2 | PII | Contains personally identifiable information |
+| `11` | 3 | PHI | Contains protected health information (HIPAA) |
+
+This is a routing hint, not a security boundary. But it is an extremely efficient one. A storage router can read a single byte --- byte 1 of the fixed header --- extract bits 6-7, and immediately decide where to send the grain. No MessagePack deserialization. No field parsing. No string comparison. Just a bit shift and a mask:
+
+```python
+def get_sensitivity(header_bytes: bytes) -> int:
+    flags = header_bytes[1]
+    return (flags >> 6) & 0x03  # Extract bits 6-7
+
+# Route based on sensitivity
+sensitivity = get_sensitivity(grain_blob)
+if sensitivity == 0b11:    # PHI
+    store = hipaa_compliant_store
+elif sensitivity == 0b10:  # PII
+    store = encrypted_store
+elif sensitivity == 0b01:  # Internal
+    store = internal_store
+else:                      # Public
+    store = default_store
+```
+
+This O(1) routing is the key benefit. In a system processing millions of grains per second, the ability to route without deserialization means compliance-aware storage can operate at wire speed.
+
+## Standard Tag Vocabulary
+
+While header bits provide fast routing, the `structural_tags` field in the payload provides detailed classification. Section 13.2 defines five standard prefix categories:
+
+### pii: --- Personal Data
+
+Tags identifying personally identifiable information:
+
+| Tag | Description |
+|---|---|
+| `pii:email` | Email address |
+| `pii:phone` | Phone number |
+| `pii:ssn` | Social Security number |
+| `pii:name` | Personal name |
+
+These tags identify data that falls under GDPR's definition of "personal data" (any information relating to an identified or identifiable natural person) and CCPA's definition of "personal information" (information that identifies or could reasonably be linked to a consumer).
+
+### phi: --- Health Data
+
+Tags identifying protected health information:
+
+| Tag | Description |
+|---|---|
+| `phi:diagnosis` | Medical diagnosis |
+| `phi:medication` | Medication records |
+| `phi:lab_result` | Laboratory test results |
+
+PHI tags correspond to HIPAA's regulatory category of "protected health information" under 45 CFR. Any grain tagged with a `phi:` prefix triggers the highest sensitivity level (`11`) in the header.
+
+### reg: --- Regulatory Jurisdiction
+
+Tags identifying which regulatory storage or retention rules apply:
+
+| Tag | Description |
+|---|---|
+| `reg:pci-dss` | PCI-compliant storage required |
+| `reg:sox` | 7-year immutable audit retention (Sarbanes-Oxley) |
+| `reg:basel-iii` | Regulatory capital data |
+| `reg:gdpr-art17` | Erasure-eligible under GDPR Article 17 |
+
+<Callout type="info">
+The `reg:` prefix is fundamentally different from `pii:` and `phi:`. Regulatory tags are routing and policy directives, not compliance classification claims. They tell the storage layer which rules apply, not what kind of data is present. The vocabulary is open-ended --- use well-known regulation identifiers as needed. A grain tagged `reg:pci-dss` is telling the system "route me to PCI-compliant storage," not "I certify that I contain cardholder data."
+</Callout>
+
+### sec: --- Security Data
+
+Tags identifying security-sensitive credentials:
+
+| Tag | Description |
+|---|---|
+| `sec:credential` | Authentication credential |
+| `sec:api_key` | API key or secret |
+| `sec:token` | Authentication or session token |
+
+Security tags trigger the PII sensitivity level (`10`) in the header. While credentials are not personal data in the GDPR sense, they require the same level of encryption and access control.
+
+### legal: --- Legal Data
+
+Tags identifying legally sensitive material:
+
+| Tag | Description |
+|---|---|
+| `legal:privilege` | Attorney-client privileged information |
+| `legal:litigation_hold` | Data subject to litigation hold (must not be deleted) |
+
+Legal tags also trigger the PII sensitivity level (`10`). A grain tagged `legal:litigation_hold` demands careful handling: it must be preserved even if a deletion request arrives, because legal hold obligations may override erasure rights.
+
+## Automatic Sensitivity Setting at Write Time
+
+The tag vocabulary is not just metadata --- it drives the header sensitivity bits. Section 13.2 states: "At write time, serializer scans tags and sets header sensitivity bits to highest classification present."
+
+This means the serializer is responsible for consistency between tags and header bits. A grain with `structural_tags: ["phi:diagnosis", "pii:name"]` must have its header sensitivity bits set to `11` (PHI), because `phi:` is the highest classification present. The serializer does not require manual configuration of the header bits; it derives them from the tags.
+
+Here is what this looks like in practice:
+
+```python
+def compute_sensitivity(structural_tags: list[str]) -> int:
+    sensitivity = 0b00  # Default: public
+
+    for tag in structural_tags:
+        if tag.startswith("phi:"):
+            return 0b11  # PHI is highest; short-circuit
+        elif tag.startswith(("pii:", "sec:", "legal:")):
+            sensitivity = max(sensitivity, 0b10)
+        elif tag.startswith("reg:"):
+            sensitivity = max(sensitivity, 0b01)
+
+    return sensitivity
+```
+
+## Sensitivity Consistency Validation
+
+Section 13.4 formalizes the relationship between tags and header bits with two rules --- one for serializers, one for parsers.
+
+### Serializer Rule
+
+At write time, the serializer MUST scan all `structural_tags` values and set the header sensitivity bits to the highest classification present, using this mapping:
+
+| Tag Prefix Present | Minimum Header Sensitivity |
+|---|---|
+| `phi:*` | `11` (PHI) |
+| `pii:*`, `sec:*`, `legal:*` | `10` (PII) |
+| `reg:*` | `01` (internal) minimum --- policy engine determines actual tier |
+| No sensitive tags | `00` or `01` at writer's discretion |
+
+Note the asymmetry for `reg:` tags. A `reg:pci-dss` tag sets the minimum to `01` (internal), but the policy engine may determine a higher tier is needed. The other prefixes have deterministic mappings.
+
+### Parser Rule
+
+At parse time, if `structural_tags` is present, the parser MUST validate that the header sensitivity bits are not lower than the highest classification the tags require. If they are lower, the parser MUST reject with `ERR_SENSITIVITY_MISMATCH`.
+
+```python
+def validate_sensitivity(header_sensitivity: int, structural_tags: list[str]):
+    required = compute_sensitivity(structural_tags)
+    if header_sensitivity < required:
+        raise ValueError(
+            f"ERR_SENSITIVITY_MISMATCH: header sensitivity {header_sensitivity} "
+            f"is lower than tags require ({required}). "
+            f"Possible serializer defect or header tampering."
+        )
+```
+
+<Callout type="warning">
+The `ERR_SENSITIVITY_MISMATCH` error indicates one of two things: a defect in the serializer that created the grain, or deliberate header tampering to bypass access controls. In either case, the grain must be rejected. A correctly implemented serializer will never produce this mismatch, so encountering it in production is a signal that something is wrong upstream.
+</Callout>
+
+This validation creates a one-way ratchet. Header sensitivity can be higher than tags require (a writer may choose `01` for a grain with no sensitive tags), but it can never be lower. The highest-classified tag present sets the floor.
+
+## Header Sensitivity Limitations
+
+Section 13.3 is explicit about what header sensitivity bits are and what they are not. They are **advisory routing metadata**, not a compliance guarantee. This distinction matters.
+
+The limitation is fundamental: tag-based sensitivity assignment depends on the writer correctly identifying and tagging sensitive fields at creation time. If a grain contains a user's Social Security number but the writer fails to tag it with `pii:ssn`, the header bits will read `00` (public) and the grain will be routed to unencrypted storage. The header cannot catch what the writer did not declare.
+
+The specification defines four practices that systems processing regulated content SHOULD follow:
+
+1. **Treat header sensitivity bits as a fast-path routing hint**, not a classification guarantee. The header enables efficient routing, but routing decisions should not be the end of the compliance story.
+
+2. **Perform payload inspection for sensitive decisions.** Before routing or sharing a grain, deserialize the payload and validate `structural_tags`. The header is the fast path; payload inspection is the verification.
+
+3. **Enforce writer responsibility.** Establish clear tagging protocols for regulated workflows. If an agent writes grains containing PHI, it must be configured to tag them with `phi:` prefixes. The specification provides the tagging mechanism; the organization provides the tagging discipline.
+
+4. **Apply layered defense.** Combine header-level filtering with payload inspection. Never gate compliance decisions solely on header bits. The header catches correctly tagged grains at wire speed; payload inspection catches everything else.
+
+This layered approach mirrors how security works in other domains. A firewall rule (fast, header-based) provides the first line of defense. Deep packet inspection (slower, payload-based) provides the second. Neither alone is sufficient.
+
+## Legal Neutrality
+
+Section 13.5 contains an important statement: the sensitivity classifications in the specification (`public`, `internal`, `PII`, `PHI`) are technical routing and storage metadata. They are not legal definitions.
+
+Different legal regimes define regulated data differently:
+
+| Jurisdiction | Term | Scope |
+|---|---|---|
+| GDPR (EU) | "personal data" | Any information relating to an identified or identifiable natural person |
+| CCPA (California) | "personal information" | Information that identifies or could reasonably be linked to a consumer |
+| LGPD (Brazil) | "dados pessoais" | Similar scope to GDPR |
+| HIPAA (USA) | "protected health information" | A specific regulatory category under 45 CFR |
+
+The specification states: "Implementations MUST determine sensitivity classification according to applicable jurisdictional law and organizational policy." The `.mg` tags and header bits are a compliance-aware tagging mechanism to facilitate routing and policy enforcement. The legal determination of what constitutes regulated data is outside the scope of the format.
+
+This neutrality is deliberate. A grain tagged `pii:email` is asserting a technical classification, not making a legal claim. Whether an email address constitutes "personal data" under a specific jurisdiction depends on context that the format cannot capture. The format provides the tagging infrastructure; legal counsel provides the classification rules.
+
+## Use Cases
+
+### Routing PHI to HIPAA-Compliant Storage
+
+A health assistant agent creates a grain recording a patient's medication:
+
+```json
+{
+  "type": "fact",
+  "subject": "patient-789",
+  "relation": "takes",
+  "object": "metformin 500mg twice daily",
+  "confidence": 0.99,
+  "source_type": "user_explicit",
+  "created_at": 1739980800000,
+  "namespace": "health-assistant",
+  "user_id": "patient-789",
+  "author_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+  "structural_tags": ["phi:medication", "pii:name"]
+}
+```
+
+The serializer scans `structural_tags`, finds `phi:medication`, and sets header sensitivity to `11` (PHI). The storage router reads byte 1 of the header, extracts bits 6-7 (`11`), and routes the grain to the HIPAA-compliant storage tier. The per-user encryption pattern from Section 20.3 encrypts the grain with a key derived from `"patient-789"`. The entire routing and encryption decision happens without parsing the MessagePack payload.
+
+### Filtering PII for Encryption at Rest
+
+A customer service agent stores a user's contact preferences:
+
+```json
+{
+  "type": "fact",
+  "subject": "alice-42",
+  "relation": "prefers",
+  "object": "email for shipping notifications",
+  "confidence": 0.95,
+  "source_type": "user_explicit",
+  "created_at": 1739980800000,
+  "namespace": "customer-service",
+  "user_id": "alice-42",
+  "author_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+  "structural_tags": ["pii:name", "pii:email", "preference"]
+}
+```
+
+The serializer finds `pii:name` and `pii:email`, setting header sensitivity to `10` (PII). The `preference` tag has no sensitive prefix and does not affect the sensitivity level. At the storage layer, the grain is routed to an encrypted tier. The presence of `user_id` triggers per-user encryption via HKDF-SHA256 key derivation. Even without deserializing the payload, the system knows this grain needs encryption.
+
+### Tagging Financial Data for PCI Compliance
+
+A financial agent records a transaction detail:
+
+```json
+{
+  "type": "fact",
+  "subject": "transaction-9182",
+  "relation": "involves",
+  "object": "card ending 4242",
+  "confidence": 1.0,
+  "source_type": "system_generated",
+  "created_at": 1739980800000,
+  "namespace": "payments",
+  "author_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+  "structural_tags": ["reg:pci-dss", "sec:credential"]
+}
+```
+
+Two tags are present: `reg:pci-dss` and `sec:credential`. The `sec:` prefix maps to PII level (`10`), which is higher than `reg:`'s minimum of `01`. The serializer sets header sensitivity to `10`. The `reg:pci-dss` tag acts as a routing directive: the policy engine sees it and routes the grain to PCI-DSS-compliant storage infrastructure. The `sec:credential` classification ensures the grain is encrypted.
+
+### Detecting Sensitivity Mismatch
+
+Consider a grain that arrives with header sensitivity `00` (public) but contains `structural_tags: ["phi:diagnosis"]`. The parser computes the required sensitivity: `phi:*` maps to `11` (PHI). The header says `00`. This is a mismatch:
+
+```
+ERR_SENSITIVITY_MISMATCH: header sensitivity 0 is lower than
+tags require (3). Possible serializer defect or header tampering.
+```
+
+The parser rejects the grain. This validation prevents a class of attacks where a malicious or buggy writer deliberately under-classifies sensitive data to bypass access controls. It also catches serializer bugs before they result in compliance violations.
+
+## Sensitivity in the Broader Architecture
+
+The sensitivity classification system connects to the other compliance features in OMS:
+
+- **Per-user encryption (Section 20.3):** Grains with `user_id` and sensitivity bits `10` or `11` are candidates for per-user key derivation and encrypted storage.
+- **Crypto-erasure (Section 20.6):** When a user's key is destroyed, all grains encrypted with that key become unrecoverable --- regardless of their sensitivity level.
+- **Selective disclosure (Section 10):** For grains that need to be partially shared, selective disclosure can hide specific fields while revealing others, with the sensitivity tags indicating which fields are sensitive.
+- **Provenance chain (Section 14.1):** Every grain's derivation history is tracked, providing an audit trail that satisfies GDPR Article 30 and HIPAA Section 164.308.
+
+The header sensitivity bits are the entry point to this system. They provide the fast path for routing decisions. The tag vocabulary provides the detailed classification. The per-user encryption pattern provides the cryptographic enforcement. And the consistency validation ensures that the header and tags always agree.
+
+## Summary
+
+| Layer | Mechanism | Speed | Accuracy |
+|---|---|---|---|
+| Header bits (13.1) | 2-bit field, byte 1 bits 6-7 | O(1) --- no deserialization | Advisory --- depends on writer |
+| Tag vocabulary (13.2) | `structural_tags` prefixes: `pii:`, `phi:`, `reg:`, `sec:`, `legal:` | Requires payload parsing | Detailed --- per-field classification |
+| Consistency validation (13.4) | Serializer sets, parser verifies | Automatic at read/write | Catches mismatches and tampering |
+| Legal neutrality (13.5) | Technical metadata, not legal definitions | N/A | Jurisdiction-dependent |
+
+The two-layer design reflects a practical reality: infrastructure needs to make fast decisions, but compliance needs to make correct decisions. Header bits handle the first case. Payload inspection handles the second. Together, they provide a sensitivity classification system that operates at wire speed for the common case while maintaining full accuracy for the cases that matter most.
+
+For the per-user encryption pattern that acts on these sensitivity classifications --- including HKDF-SHA256 key derivation, blind indexes, and crypto-erasure --- see [GDPR-Ready Agent Memory](/blog/gdpr-ready-agent-memory).

@@ -1,0 +1,242 @@
+---
+title: "Content Addressing with SHA-256: How Memory Grains Get Their Identity"
+description: "A deep dive into how OMS uses SHA-256 content addressing to give every memory grain a unique, verifiable, tamper-evident identity — covering the formula, the five roles of a content address, temporal uniqueness, and security considerations."
+date: "2026-02-19"
+readTime: "11 min read"
+tags: ["content-addressing", "sha-256", "integrity", "technical"]
+---
+
+Every memory grain in the Open Memory Specification has exactly one identity: the SHA-256 hash of its complete binary representation. This is not an arbitrary ID assigned by a database. It is not a UUID generated at random. It is a cryptographic fingerprint derived deterministically from the grain's own bytes. Change a single bit, and the identity changes. Recompute the hash on any machine, in any language, at any time, and you get the same result.
+
+This property — content addressing — is the foundation on which OMS builds integrity verification, deduplication, provenance tracking, and auditable knowledge chains. This post explains exactly how it works, why the design choices matter, and what implementers need to know to get it right.
+
+## The Formula
+
+Section 5 of the OMS v1.0 specification defines content addressing in a single line:
+
+```
+content_address = lowercase_hex(SHA-256(complete_blob_bytes))
+```
+
+The input to SHA-256 is the **complete blob** — not just the payload, but the full binary starting from byte 0:
+
+- **Bytes 0-8:** The 9-byte fixed header (version, flags, type, namespace hash, created_at_sec)
+- **Bytes 9+:** The canonical MessagePack (or CBOR) payload
+
+The output is a 256-bit digest rendered as a 64-character lowercase hexadecimal string. Uppercase hex is explicitly rejected by the spec.
+
+### The ABNF Format
+
+Section 5.1 defines the content address format in Augmented Backus-Naur Form:
+
+```abnf
+content-address = 64 HEXDIG
+HEXDIG          = DIGIT / "a" / "b" / "c" / "d" / "e" / "f"
+DIGIT           = %x30-39
+```
+
+This is deliberately strict. No `0x` prefix. No uppercase letters. No dashes or separators. Just 64 lowercase hex characters representing 32 bytes.
+
+## SHA-256: The Hash Function
+
+SHA-256 is defined in [FIPS 180-4](https://csrc.nist.gov/publications/detail/fips/180/4/final), the Secure Hash Standard published by NIST. It produces a 256-bit (32-byte) digest from input of arbitrary length up to 2^64 bits.
+
+OMS v1.0 permits no alternative hash functions. This is a deliberate constraint for interoperability — every implementation, in every language, on every platform, computes the same hash using the same algorithm. There is no algorithm negotiation, no version field for hash selection, no extensibility point. SHA-256, period.
+
+### Collision Resistance
+
+The spec notes that SHA-256 provides 128-bit collision resistance. This means that finding two distinct inputs that produce the same hash requires approximately 2^128 operations (via the birthday paradox). To put that in perspective, if every atom in the observable universe were a computer performing a billion hash operations per second, running for the entire age of the universe, you would still be nowhere close to 2^128 operations.
+
+Current cryptanalytic research has not reduced the practical security margin of SHA-256. The specification states: "Current estimates suggest SHA-256 remains secure for the foreseeable future."
+
+## A Concrete Example: Vector 1
+
+The best way to understand content addressing is to trace through a real example. Test Vector 1 from Section 21.1 defines a minimal Fact grain:
+
+```json
+{
+  "type": "fact",
+  "subject": "user",
+  "relation": "prefers",
+  "object": "dark mode",
+  "confidence": 0.9,
+  "source_type": "user_explicit",
+  "created_at": 1768471200000,
+  "namespace": "shared",
+  "author_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+}
+```
+
+After canonical serialization — field name compaction, lexicographic key sorting, NFC string normalization, null omission, MessagePack encoding — and prepending the 9-byte header, the complete blob is 159 bytes:
+
+```
+01 00 01 a4 d2 69 68 ba a0 89 a4 61 64 69 64 d9 38 64 69 64 3a 6b 65 79 3a
+7a 36 4d 6b 68 61 58 67 42 5a 44 76 6f 74 44 6b 4c 35 32 35 37 66 61 69 7a
+74 69 47 69 43 32 51 74 4b 4c 47 70 62 6e 6e 45 47 74 61 32 64 6f 4b a1 63
+cb 3f ec cc cc cc cc cc cd a2 63 61 cf 00 00 01 9b c1 19 01 00 a2 6e 73 a6
+73 68 61 72 65 64 a1 6f a9 64 61 72 6b 20 6d 6f 64 65 a1 72 a7 70 72 65 66
+65 72 73 a1 73 a4 75 73 65 72 a2 73 74 ad 75 73 65 72 5f 65 78 70 6c 69 63
+69 74 a1 74 a4 66 61 63 74
+```
+
+The header breaks down as:
+
+| Bytes | Value | Meaning |
+|-------|-------|---------|
+| `01` | 0x01 | Version 1 |
+| `00` | 0x00 | Flags: public, MessagePack, unsigned |
+| `01` | 0x01 | Type: Fact |
+| `a4 d2` | 0xa4d2 | SHA-256("shared")[0:2] as uint16 big-endian |
+| `69 68 ba a0` | 1768471200 | created_at_sec (2026-01-15T10:00:00Z) |
+
+The SHA-256 hash of all 159 bytes is:
+
+```
+3288d0d41cf49a1d428e404f0b6a6fe60388be9536937557f6139b813d53a520
+```
+
+That is the grain's content address — its permanent, verifiable identity.
+
+## The Five Roles of a Content Address
+
+Section 5.4 defines five roles that a content address serves simultaneously. These are not aspirational design goals; they are functional properties that fall out of content addressing by construction.
+
+### 1. Unique Identifier
+
+The content address is the grain's filename in content-addressed stores. Just as git uses the SHA-1 (or SHA-256) hash of objects as their storage key, OMS uses the content address as the canonical way to name and locate a grain. There is no separate ID column, no auto-incrementing integer, no UUID mapping. The content *is* the identity.
+
+### 2. Integrity Check
+
+Any modification to the grain — even a single flipped bit — produces a different SHA-256 hash. If you retrieve a grain by its content address, recompute the hash, and get the same value, you have cryptographic assurance that the bytes have not been altered. This is not a checksum that can be forged; SHA-256's preimage resistance means an attacker cannot construct a different blob that produces the same hash.
+
+### 3. Deduplication Key
+
+Byte-identical content maps to the same address. If two agents independently produce the exact same grain (same payload, same header bytes), they get the same content address. A store can safely deduplicate, keeping one copy and serving it to both consumers. This is the same principle that makes git efficient: identical objects are stored once.
+
+<Callout type="info">
+The spec is precise about what "identical" means here: **byte-identical blobs**, including the creation timestamp in the header. Two grains with the same semantic content but different creation times are different blobs with different hashes. See the section on temporal uniqueness below.
+</Callout>
+
+### 4. Provenance Link
+
+When one grain is derived from another — through consolidation, inference, or transformation — the derived grain records the source grain's content address in its `derived_from` field. This creates an immutable, verifiable chain of provenance. You can trace any grain back to its origins by following content addresses, and verify at each step that the referenced grain has not been tampered with.
+
+### 5. Access Key
+
+To retrieve a grain from a store, you request it by content address. The address serves as both the lookup key and the verification check: fetch the bytes, hash them, confirm the hash matches what you asked for. This pattern is identical to how IPFS, Nix, and other content-addressed systems work.
+
+## Temporal Uniqueness: Why Creation Time Is Part of Identity
+
+Section 5.5 addresses a subtle but important design decision. The 9-byte header includes `created_at_sec` (bytes 5-8), a uint32 Unix epoch timestamp. Because the header is part of the hashed blob, the creation timestamp is part of the content address.
+
+This means: **two grains with identical semantic payload but different creation timestamps produce different content addresses.** Recording "user prefers dark mode" on January 15 produces a different hash than recording the exact same fact on February 1.
+
+Why does this matter? The spec gives a clear rationale:
+
+> Binding the content address to the creation time ensures each write event is a unique, non-replayable grain. An adversary cannot substitute a grain with an older timestamp without producing a different hash, preserving audit chain integrity.
+
+Consider an audit chain where grain A supersedes grain B. If content addresses did not include timestamps, an attacker could create a grain with the same payload as A but a different (earlier) timestamp, and it would have the same content address. The attacker could then claim the grain existed earlier than it actually did, undermining the audit trail.
+
+With temporal uniqueness, each write is cryptographically distinct. The same knowledge recorded at two different times produces two different grains, each traceable to its specific moment of creation.
+
+<Callout type="warning">
+**Implication for deduplication:** Content-address deduplication applies only to byte-identical blobs — same payload encoded at the same creation second. For semantic deduplication (the same fact written at different times), use `superseded_by` to mark the older grain as replaced, or `derived_from` to express provenance.
+</Callout>
+
+## Signing Does NOT Change the Content Address
+
+Section 9.2 makes an important architectural statement: cryptographic signing wraps the grain externally and does not alter its content address.
+
+The COSE Sign1 envelope (RFC 9052) sits *outside* the blob:
+
+```
+[Inner .mg blob]                     [Outer COSE_Sign1 — not content-addressed]
+|-- Byte 1, bit 0: signed = 1       |-- protected headers
+|-- payload bytes                    |-- unprotected headers
+|-- content address = SHA-256(blob)  |-- signature over inner blob bytes
+```
+
+The specification states this explicitly: "Signing does not change the inner blob bytes or its content address. An unsigned and a signed delivery of the same grain share the same content address."
+
+This design means you can verify a grain's integrity (via content address) independently of its authenticity (via COSE signature). A store that does not support signatures can still verify and deduplicate grains by content address. A store that does support signatures wraps and unwraps the COSE envelope without affecting the grain's identity.
+
+## Encryption DOES Change the Content Address
+
+Section 20.2 describes the opposite case: when a grain is encrypted, the content address changes because you are now hashing different bytes.
+
+> Content address of encrypted grain is the hash of ciphertext, not plaintext.
+
+The spec elaborates:
+
+> Encrypting a grain changes its content address. Encrypting the same plaintext with different keys or IVs produces different ciphertext and therefore different content addresses. Encrypted grains do not deduplicate via content address.
+
+This is an inherent property of authenticated encryption (the spec recommends AES-256-GCM). The ciphertext includes the initialization vector (IV), which should be unique per encryption operation. Even encrypting the same grain twice with the same key produces different ciphertext and therefore different content addresses.
+
+<Callout type="security">
+Systems requiring deduplication of encrypted data SHOULD compute and store the plaintext content address separately as metadata before encryption. This preserves the deduplication and provenance benefits while maintaining confidentiality.
+</Callout>
+
+## Security: Constant-Time Hash Comparison
+
+Section 20.4 addresses a subtle security requirement that many implementations get wrong: hash comparison must be constant-time.
+
+### The Timing Attack
+
+When comparing two hash strings, a naive byte-by-byte comparison returns `false` as soon as it finds the first differing byte. An attacker who can measure response times with sufficient precision can determine how many leading bytes of a hash match, then iterate to discover the full hash value one byte at a time.
+
+For content-addressed systems, this could allow an attacker to determine whether a specific grain exists in a store without having legitimate access — by submitting candidate hashes and observing timing differences.
+
+### The Fix
+
+Section 22.3 provides constant-time comparison code in three languages:
+
+**Python:**
+```python
+import hmac
+hmac.compare_digest(expected_hash, computed_hash)
+```
+
+**Go:**
+```go
+import "crypto/subtle"
+subtle.ConstantTimeCompare(a, b) == 1
+```
+
+**JavaScript:**
+```javascript
+import crypto from "crypto";
+crypto.timingSafeEqual(a, b);
+```
+
+These functions compare all bytes regardless of where the first mismatch occurs, executing in time proportional only to the length of the inputs. The comparison always examines all 32 bytes (or 64 hex characters), whether the hashes differ at the first byte or the last.
+
+<Callout type="warning">
+Standard equality operators (`==`, `===`, `bytes.Equal()`) are NOT constant-time in most languages. Always use the platform-specific cryptographic comparison function listed above when verifying content addresses.
+</Callout>
+
+## Content Addressing in the Broader Ecosystem
+
+OMS is not the first system to use content addressing, and the pattern it follows is well-established. Git uses SHA-1 (migrating to SHA-256) to identify every object — blobs, trees, commits — by the hash of their content. IPFS uses content identifiers (CIDs) based on multihash to name every block in its distributed file system. Nix uses SHA-256 hashes to identify every package derivation, ensuring reproducible builds.
+
+What OMS adds to this pattern is the combination of content addressing with domain-specific semantics for agent memory: typed grains with a fixed 9-byte header that enables O(1) field extraction, temporal binding that prevents replay attacks, and a canonical serialization that ensures cross-implementation hash stability.
+
+The 9-byte header is critical to this last point. By including the version, flags, type, namespace hash, and creation timestamp in the hashed bytes — outside the MessagePack payload but inside the content address — OMS ensures that two grains cannot accidentally collide just because their JSON representation looks similar. The type byte alone means a Fact and an Episode with superficially similar content will always hash differently.
+
+## Summary
+
+Content addressing in OMS is built on a single formula, but that formula carries significant architectural weight:
+
+| Property | Mechanism |
+|----------|-----------|
+| **Identity** | SHA-256 of complete blob (header + payload) |
+| **Format** | 64 lowercase hex characters (ABNF: `64 HEXDIG`) |
+| **Hash function** | FIPS 180-4 SHA-256, no alternatives in v1.0 |
+| **Collision resistance** | 128-bit (birthday bound) |
+| **Temporal binding** | `created_at_sec` in header means same content at different times = different hash |
+| **Signing** | COSE Sign1 wraps blob externally; content address unchanged |
+| **Encryption** | Hash of ciphertext, not plaintext; content address changes |
+| **Comparison** | Constant-time only (`hmac.compare_digest`, `subtle.ConstantTimeCompare`, `crypto.timingSafeEqual`) |
+
+Every grain's identity is self-certifying. You do not need to trust the store, the transport, or the sender. You need only the bytes and a SHA-256 implementation. Hash the bytes, compare the result, and you have cryptographic proof that the grain is exactly what it claims to be.
+
+For a practical example of content addressing applied to structured knowledge, see [Memory Type Deep Dive: Facts](/blog/memory-type-facts), which walks through how Facts use content addresses for provenance chains and supersession.

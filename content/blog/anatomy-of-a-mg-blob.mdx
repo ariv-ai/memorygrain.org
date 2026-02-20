@@ -1,0 +1,441 @@
+---
+title: "Anatomy of a .mg Blob"
+description: "A byte-by-byte walkthrough of the 9-byte fixed header and MessagePack payload that make up a memory grain binary blob, using the actual hex from OMS Test Vector 1."
+date: "2026-02-19"
+readTime: "12 min read"
+tags: ["binary-format", "header", "technical"]
+---
+
+Every memory grain in the Open Memory Specification is a binary blob: a 9-byte fixed header followed by a canonical MessagePack (or optionally CBOR) payload. This post walks through the format byte by byte, using the actual hex from Test Vector 1 in the OMS v1.0 specification.
+
+By the end, you will be able to read raw `.mg` hex and understand exactly what each byte means — from the version number to the namespace routing hash to the individual key-value pairs in the serialized payload.
+
+## The blob we are dissecting
+
+Test Vector 1 defines a minimal Fact grain with this input:
+
+```json
+{
+  "type": "fact",
+  "subject": "user",
+  "relation": "prefers",
+  "object": "dark mode",
+  "confidence": 0.9,
+  "source_type": "user_explicit",
+  "created_at": 1768471200000,
+  "namespace": "shared",
+  "author_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+}
+```
+
+The complete blob is 159 bytes. Here it is in hex:
+
+```
+01 00 01 a4 d2 69 68 ba a0 89 a4 61 64 69 64 d9
+38 64 69 64 3a 6b 65 79 3a 7a 36 4d 6b 68 61 58
+67 42 5a 44 76 6f 74 44 6b 4c 35 32 35 37 66 61
+69 7a 74 69 47 69 43 32 51 74 4b 4c 47 70 62 6e
+6e 45 47 74 61 32 64 6f 4b a1 63 cb 3f ec cc cc
+cc cc cc cd a2 63 61 cf 00 00 01 9b c1 19 01 00
+a2 6e 73 a6 73 68 61 72 65 64 a1 6f a9 64 61 72
+6b 20 6d 6f 64 65 a1 72 a7 70 72 65 66 65 72 73
+a1 73 a4 75 73 65 72 a2 73 74 ad 75 73 65 72 5f
+65 78 70 6c 69 63 69 74 a1 74 a4 66 61 63 74
+```
+
+The SHA-256 hash of these 159 bytes — the grain's content address — is:
+
+```
+3288d0d41cf49a1d428e404f0b6a6fe60388be9536937557f6139b813d53a520
+```
+
+Let us take it apart.
+
+## The 9-byte fixed header
+
+The first 9 bytes of every `.mg` blob form a fixed header. These bytes can be read at constant offsets without any deserialization — no MessagePack parsing, no key lookup, no string decoding. This is by design: principle #7 of OMS is **"index without deserialize"**, and the fixed header is how that works.
+
+```
+Offset:  0     1     2     3     4     5     6     7     8
+Hex:     01    00    01    a4    d2    69    68    ba    a0
+Field:   Ver   Flags Type  NS hash     Created-at (u32)
+```
+
+Here is what the spec (Section 3.1) defines for each position:
+
+```
+ 0       1       2       3   4   5       6       7       8       9      10 ...
++-------+-------+-------+---+---+-------+-------+-------+-------+-------+---
+| Ver   | Flags | Type  |  NS hash  |        created_at (u32)   | MsgPack
+| 0x01  | uint8 | uint8 |  uint16   |       (epoch seconds)     | payload
++-------+-------+-------+---+---+-------+-------+-------+-------+-------+---
+ Fixed header (9 bytes)                                          Variable
+```
+
+### Byte 0: Version -- `0x01`
+
+The first byte is always `0x01` for OMS v1.0. Any other value causes the parser to reject the blob immediately with `ERR_VERSION`. This ensures that future major versions of the format can be distinguished at byte 0 without ambiguity.
+
+In our Vector 1 blob:
+
+```
+01
+^^
+Version = 1
+```
+
+There is no version negotiation, no fallback. If a parser sees `0x02`, it rejects. This is intentional: forward compatibility happens through additive fields within v1, not through version byte changes.
+
+### Byte 1: Flags -- `0x00`
+
+The flags byte is a bitfield where each bit carries specific meaning:
+
+| Bit | Flag | Meaning | Our value |
+|-----|------|---------|-----------|
+| 0 | `signed` | COSE Sign1 envelope wraps this grain | 0 -- not signed |
+| 1 | `encrypted` | Payload is encrypted (AES-256-GCM) | 0 -- not encrypted |
+| 2 | `compressed` | Payload is zstd-compressed before encryption | 0 -- not compressed |
+| 3 | `has_content_refs` | Grain references external multi-modal content | 0 -- no content refs |
+| 4 | `has_embedding_refs` | Grain references external vector embeddings | 0 -- no embedding refs |
+| 5 | `cbor_encoding` | Payload is CBOR instead of MessagePack | 0 -- MessagePack |
+| 6-7 | `sensitivity` | Classification: 00=public, 01=internal, 10=pii, 11=phi | 00 -- public |
+
+In our Vector 1 blob:
+
+```
+00 = 0b00000000
+```
+
+All bits are zero. This means: unsigned, unencrypted, uncompressed, no external content or embedding references, MessagePack encoding, public sensitivity. This is the simplest possible configuration.
+
+<Callout type="info">
+The sensitivity bits (6-7) enable O(1) routing decisions. A store can route PHI-classified grains to encrypted storage by checking two bits at a fixed offset, without deserializing the payload or inspecting `structural_tags`. The spec emphasizes that these bits are advisory routing metadata, not a compliance guarantee -- payload inspection remains necessary for security-critical decisions (Section 13.3).
+</Callout>
+
+Let us look at some other flags byte values for contrast:
+
+| Hex | Binary | Meaning |
+|-----|--------|---------|
+| `0x00` | `00000000` | Public, unsigned, MessagePack (our Vector 1) |
+| `0x01` | `00000001` | Signed (COSE Sign1 wrapper present) |
+| `0x03` | `00000011` | Signed and encrypted |
+| `0x07` | `00000111` | Signed, encrypted, and compressed |
+| `0x20` | `00100000` | CBOR encoding instead of MessagePack |
+| `0x80` | `10000000` | PII sensitivity classification |
+| `0xC0` | `11000000` | PHI sensitivity classification |
+| `0x89` | `10001001` | Signed, content refs present, PII |
+
+### Byte 2: Type -- `0x01`
+
+The type byte identifies the memory type using a single-byte enum:
+
+| Value | Type |
+|-------|------|
+| `0x01` | Fact |
+| `0x02` | Episode |
+| `0x03` | Checkpoint |
+| `0x04` | Workflow |
+| `0x05` | ToolCall |
+| `0x06` | Observation |
+| `0x07` | Goal |
+| `0x08`-`0xEF` | Reserved for future standard types |
+| `0xF0`-`0xFF` | Application-defined types |
+
+In our Vector 1 blob:
+
+```
+01
+^^
+Type = Fact (0x01)
+```
+
+The type byte is what makes principle #7 work for type-based filtering. A store scanning millions of grains for Observations (`0x06`) can check byte 2 at a fixed offset and skip everything else. No deserialization, no string comparison -- just a single byte comparison.
+
+The reserved range `0x08`-`0xEF` leaves room for 232 future standard types. The application-defined range `0xF0`-`0xFF` provides 16 slots for domain-specific types that extend the format without waiting for a spec revision.
+
+### Bytes 3-4: Namespace hash -- `0xa4 0xd2`
+
+These two bytes are the first two bytes of the SHA-256 hash of the namespace string, encoded as a `uint16` in big-endian byte order. They serve as a routing hint that provides 65,536 possible buckets for partitioning grains by namespace.
+
+For our Vector 1 grain, the namespace is `"shared"`. The computation:
+
+```
+SHA-256("shared") = a4d2...  (remaining bytes omitted)
+First two bytes:   0xa4, 0xd2
+uint16 big-endian: 0xa4d2 = 42,194 (decimal)
+```
+
+In the blob:
+
+```
+a4 d2
+^^^^^
+Namespace hash = SHA-256("shared")[0:2] = 0xa4d2
+```
+
+<Callout type="warning">
+The namespace hash is a routing hint only. The full namespace string (`"shared"`) remains authoritative in the payload. The spec is explicit: this field MUST NOT be used for security decisions (Sections 13.3 and 20). Two different namespace strings could, in theory, hash to the same two-byte prefix -- that is acceptable for routing but not for access control.
+</Callout>
+
+The purpose of the namespace hash is efficiency. A distributed store can shard grains across nodes using this two-byte value without deserializing the payload. With 65,536 buckets, even a simple modulo partition gives reasonable distribution. For the common namespace `"shared"`, the routing bucket is 42,194.
+
+### Bytes 5-8: Created-at -- `0x69 0x68 0xba 0xa0`
+
+The final four bytes of the header encode the creation timestamp as a `uint32` in big-endian byte order, representing seconds since the Unix epoch (1970-01-01T00:00:00Z).
+
+```
+69 68 ba a0
+^^^^^^^^^^^
+uint32 big-endian = 0x6968baa0 = 1,768,471,200 (decimal)
+```
+
+Converting to a human-readable timestamp:
+
+```
+1,768,471,200 seconds since epoch = 2026-01-15T10:00:00Z
+```
+
+The `uint32` range covers dates from 1970-01-01 to 2106-02-07. This is the coarse timestamp -- second precision in the header for efficient time-range scanning. The payload carries the full `created_at` field as an `int64` in epoch milliseconds (`1768471200000`), providing millisecond precision when needed.
+
+<Callout type="info">
+The `created_at` timestamp in the header is part of the content-addressed bytes. Two grains with identical semantic payload but different creation timestamps produce different content addresses. This is intentional: creation time is part of grain identity, ensuring each write event is unique and non-replayable (Section 5.5).
+</Callout>
+
+## The complete header summary
+
+Putting all 9 bytes together for Vector 1:
+
+| Offset | Hex | Field | Value |
+|--------|-----|-------|-------|
+| 0 | `01` | Version | 1 |
+| 1 | `00` | Flags | Public, unsigned, MessagePack, no refs |
+| 2 | `01` | Type | Fact |
+| 3-4 | `a4 d2` | Namespace hash | SHA-256("shared")[0:2] = 42,194 |
+| 5-8 | `69 68 ba a0` | Created-at | 1,768,471,200 = 2026-01-15T10:00:00Z |
+
+Nine bytes. Fixed offsets. No parsing required. A store can determine the version, check sensitivity classification, identify the memory type, route by namespace, and filter by time range -- all from these nine bytes alone.
+
+## The payload: MessagePack from byte 9 onward
+
+After the 9-byte header, the remaining 150 bytes are the canonical MessagePack payload. This is where the grain's actual content lives.
+
+### The map marker: `0x89` -- fixmap(9)
+
+The payload begins at byte offset 9 with `0x89`:
+
+```
+89
+^^
+fixmap format: 1000XXXX where XXXX = 1001 (binary) = 9 (decimal)
+```
+
+In [MessagePack](https://github.com/msgpack/msgpack/blob/master/spec.md), `0x80`-`0x8F` is the fixmap range. The low nibble encodes the number of key-value pairs. `0x89` means "a map with 9 entries." This single byte tells the parser exactly how many key-value pairs to expect.
+
+Why 9? Our input grain has 9 fields: `type`, `subject`, `relation`, `object`, `confidence`, `source_type`, `created_at`, `namespace`, and `author_did`. After field compaction (Section 6), these become the short keys: `t`, `s`, `r`, `o`, `c`, `st`, `ca`, `ns`, and `adid`.
+
+### Key ordering: lexicographic by UTF-8 bytes
+
+The spec requires map keys to be sorted lexicographically by their UTF-8 byte representation (Section 4.1). After field compaction, the 9 keys sort as:
+
+```
+"adid" < "c" < "ca" < "ns" < "o" < "r" < "s" < "st" < "t"
+```
+
+This ordering is determined by comparing byte values: `a` (0x61) < `c` (0x63) < `n` (0x6E) < `o` (0x6F) < `r` (0x72) < `s` (0x73) < `t` (0x74). For keys starting with the same byte, comparison continues: `ca` (0x63, 0x61) comes after `c` (0x63) because single-byte `c` is shorter; `st` (0x73, 0x74) comes after `s` (0x73) for the same reason.
+
+<Callout type="warning">
+Key ordering is the most common source of cross-implementation hash mismatches. If your serializer sorts `"s"` before `"c"`, the resulting bytes will differ, producing a different SHA-256 hash and a different content address. The spec declares this explicitly: `CORRECT ordering: {`"adid"`, "c", "ca", "ns", "o", "r", "s", "st", "t"}`.
+</Callout>
+
+### Walking through each key-value pair
+
+Let us decode the payload bytes after the `0x89` map marker. Each key is a MessagePack string (fixstr format: `0xa0`-`0xbf`, where the low 5 bits encode the string length), followed by its value.
+
+**Pair 1: `"adid"` = `"did:key:z6MkhaXg..."`**
+
+```
+a4 61 64 69 64
+```
+
+- `a4` = fixstr(4) -- a string of 4 bytes
+- `61 64 69 64` = "adid" in UTF-8
+
+The value follows:
+
+```
+d9 38 64 69 64 3a 6b 65 79 3a 7a 36 4d 6b ...
+```
+
+- `d9` = str8 format marker (string with 8-bit length prefix)
+- `38` = 56 (decimal) -- the string is 56 bytes long
+- Next 56 bytes = `"did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"`
+
+The DID is 56 characters, which exceeds the fixstr limit of 31 bytes, so MessagePack uses the str8 format (2-byte overhead instead of 1).
+
+**Pair 2: `"c"` = `0.9`**
+
+```
+a1 63 cb 3f ec cc cc cc cc cc cd
+```
+
+- `a1` = fixstr(1)
+- `63` = "c" in UTF-8
+- `cb` = float64 format marker
+- `3f ec cc cc cc cc cc cd` = IEEE 754 double-precision encoding of 0.9
+
+The 8 bytes `3feccccccccccccd` represent 0.9 in IEEE 754 binary64 format. The spec requires float64 exclusively -- float32 is forbidden (Section 4.3). This eliminates a class of cross-implementation bugs where different runtimes might choose different precisions.
+
+**Pair 3: `"ca"` = `1768471200000`**
+
+```
+a2 63 61 cf 00 00 01 9b c1 19 01 00
+```
+
+- `a2` = fixstr(2)
+- `63 61` = "ca" in UTF-8
+- `cf` = uint64 format marker
+- `00 00 01 9b c1 19 01 00` = 1,768,471,200,000 in big-endian
+
+This is the full-precision `created_at` in epoch milliseconds. Note the distinction: the header carries seconds (`1768471200` as uint32 at bytes 5-8) while the payload carries milliseconds (`1768471200000` as int64). The header is for fast scanning; the payload is for precision.
+
+**Pair 4: `"ns"` = `"shared"`**
+
+```
+a2 6e 73 a6 73 68 61 72 65 64
+```
+
+- `a2` = fixstr(2)
+- `6e 73` = "ns"
+- `a6` = fixstr(6)
+- `73 68 61 72 65 64` = "shared"
+
+The namespace string in the payload is the authoritative value. The two-byte hash in the header (`0xa4d2`) is derived from this string but serves only as a routing hint.
+
+**Pair 5: `"o"` = `"dark mode"`**
+
+```
+a1 6f a9 64 61 72 6b 20 6d 6f 64 65
+```
+
+- `a1` = fixstr(1)
+- `6f` = "o"
+- `a9` = fixstr(9)
+- `64 61 72 6b 20 6d 6f 64 65` = "dark mode"
+
+**Pair 6: `"r"` = `"prefers"`**
+
+```
+a1 72 a7 70 72 65 66 65 72 73
+```
+
+- `a1` = fixstr(1)
+- `72` = "r"
+- `a7` = fixstr(7)
+- `70 72 65 66 65 72 73` = "prefers"
+
+**Pair 7: `"s"` = `"user"`**
+
+```
+a1 73 a4 75 73 65 72
+```
+
+- `a1` = fixstr(1)
+- `73` = "s"
+- `a4` = fixstr(4)
+- `75 73 65 72` = "user"
+
+**Pair 8: `"st"` = `"user_explicit"`**
+
+```
+a2 73 74 ad 75 73 65 72 5f 65 78 70 6c 69 63 69 74
+```
+
+- `a2` = fixstr(2)
+- `73 74` = "st"
+- `ad` = fixstr(13)
+- `75 73 65 72 5f 65 78 70 6c 69 63 69 74` = "user_explicit"
+
+**Pair 9: `"t"` = `"fact"`**
+
+```
+a1 74 a4 66 61 63 74
+```
+
+- `a1` = fixstr(1)
+- `74` = "t"
+- `a4` = fixstr(4)
+- `66 61 63 74` = "fact"
+
+And that is the entire blob. Nine header bytes plus 150 payload bytes equals 159 bytes total, hashing to the content address `3288d0d41cf49a1d428e404f0b6a6fe60388be9536937557f6139b813d53a520`.
+
+## From bytes to content address
+
+The content address is computed over every byte in the blob -- header and payload together:
+
+```
+content_address = lowercase_hex(SHA-256(header_bytes || payload_bytes))
+                = lowercase_hex(SHA-256(all 159 bytes))
+                = 3288d0d41cf49a1d428e404f0b6a6fe60388be9536937557f6139b813d53a520
+```
+
+This is defined in Section 5 of the spec. The hash function is SHA-256, per [FIPS 180-4](https://csrc.nist.gov/publications/detail/fips/180/4/final). No alternative hash functions are permitted in v1.0. The hash must be represented as a 64-character lowercase hexadecimal string -- uppercase hex is rejected.
+
+Change any byte -- a single bit in the flags, a different namespace, a timestamp off by one second -- and you get a completely different content address. This is the integrity guarantee: the content address is a commitment to the exact byte sequence.
+
+<Callout type="security">
+When comparing content addresses for integrity verification, use constant-time comparison to prevent timing attacks. In Python: `hmac.compare_digest()`. In Go: `crypto/subtle.ConstantTimeCompare()`. In JavaScript: `crypto.timingSafeEqual()`. Section 20.4 of the spec makes this explicit.
+</Callout>
+
+## Size boundaries
+
+The spec defines clear size boundaries for `.mg` blobs (Section 3.3):
+
+### Minimum: 10 bytes
+
+The smallest valid blob is a 9-byte header followed by `0x80` -- an empty MessagePack fixmap (a map with zero entries). This is technically valid at the format level, though it would fail schema validation for any of the seven memory types (all require at least `type` and `created_at`).
+
+```
+01 00 01 00 00 00 00 00 00 80
+^^                         ^^
+Header (9 bytes)           Empty fixmap (1 byte)
+```
+
+### Maximum: 4 GB
+
+The theoretical maximum is constrained by MessagePack's uint32 size limit for map32 and str32 formats. In practice, the recommended maximums are much smaller:
+
+| Profile | Target devices | Recommended max |
+|---------|---------------|-----------------|
+| Extended | Servers, desktops, edge gateways | 1 MB |
+| Standard | Single-board computers, mobile, IoT | 32 KB |
+| Lightweight | Microcontrollers, battery-powered sensors | 512 bytes |
+
+The lightweight profile is notable: at 512 bytes maximum, a grain must fit in less memory than a single TCP packet. This profile supports only required fields (`type`, `subject`, `relation`, `object`, `confidence`, `created_at`, `namespace`) and omits `context`, `derived_from`, `provenance_chain`, `content_refs`, and `embedding_refs`. Streaming deserialization is recommended to avoid holding the full blob in memory.
+
+Our Vector 1 blob at 159 bytes fits comfortably within all three profiles.
+
+## Nesting depth limits
+
+The spec also recommends maximum nesting depths to prevent stack overflow from adversarially deep payloads (Section 4.10):
+
+| Profile | Maximum nesting depth |
+|---------|-----------------------|
+| Extended | 32 levels |
+| Standard | 16 levels |
+| Lightweight | 8 levels |
+
+Our Vector 1 blob has a nesting depth of 1 (a single flat map), well within all limits. Deeper nesting occurs with fields like `provenance_chain` (array of maps) or `content_refs` (array of maps with nested metadata maps).
+
+## What makes this format work
+
+The design choices in the `.mg` blob format are mutually reinforcing:
+
+**Fixed header at fixed offsets** means a store can index grains by type, namespace, time, and sensitivity without ever invoking a MessagePack parser. This is principle #7 in action.
+
+**Canonical serialization** means the same logical grain always produces the same bytes, regardless of which language or library serialized it. This is what makes content addressing reliable across implementations.
+
+**Field compaction** means a field name like `source_type` occupies 2 bytes (`st`) instead of 11, and `confidence` occupies 1 byte (`c`) instead of 10. For the DID string alone in our example, the key is `adid` (4 bytes) instead of `author_did` (10 bytes). Across millions of grains, this compaction adds up.
+
+**Content addressing over the complete blob** (header plus payload) means the creation timestamp is part of the grain's identity. Two writes of the same knowledge at different times produce different grains -- each uniquely identifiable, each independently verifiable.
+
+For a conceptual overview of the seven memory types and the ten design principles that shape this format, see [What Is a Memory Grain?](/blog/what-is-a-memory-grain). For the motivation behind persistent agent memory and the eight requirements OMS addresses, see [Why AI Agents Need Persistent Memory](/blog/why-ai-agents-need-persistent-memory).

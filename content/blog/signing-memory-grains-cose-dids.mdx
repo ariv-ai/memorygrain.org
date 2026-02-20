@@ -1,0 +1,253 @@
+---
+title: "Signing Memory Grains: COSE Envelopes and Decentralized Identity"
+description: "OMS uses COSE Sign1 envelopes and W3C Decentralized Identifiers to provide cryptographic authenticity for memory grains — without certificate authorities, without centralized PKI, and without changing a grain's content address."
+date: "2026-02-19"
+readTime: "14 min read"
+tags: ["cryptography", "cose", "did", "signing", "identity", "security"]
+---
+
+A content address proves that a grain has not been tampered with. But it does not prove *who created it*. An unsigned grain with a valid SHA-256 hash could have been produced by anyone. For agent-to-agent sharing, audit compliance, and regulatory scenarios, you need more than integrity. You need **authenticity**.
+
+The Open Memory Specification addresses this through two complementary standards: [COSE Sign1](https://www.rfc-editor.org/rfc/rfc9052) envelopes for cryptographic signatures and [W3C Decentralized Identifiers (DIDs)](https://www.w3.org/TR/did-core/) for signer identity. Together, they let any system verify who created a grain, without relying on certificate authorities or centralized public key infrastructure.
+
+This post walks through the signing architecture defined in Sections 9 and 12 of the OMS v1.0 specification, the identity model based on DIDs, and the practical details of implementing verification.
+
+## Why not just hash?
+
+Content addressing via SHA-256 gives OMS grains tamper evidence: if any byte changes, the hash changes. But hashing alone is **anonymous**. Anyone who knows the content can produce the same hash. When grains cross organizational boundaries, you need answers to three questions:
+
+1. **Who created this grain?** (Authenticity)
+2. **Has it been modified since creation?** (Integrity)
+3. **Can I verify the creator's identity without a central authority?** (Decentralization)
+
+COSE Sign1 answers questions 1 and 2. W3C DIDs answer question 3.
+
+## The COSE Sign1 envelope
+
+[RFC 9052](https://www.rfc-editor.org/rfc/rfc9052) defines CBOR Object Signing and Encryption (COSE), a standard for signing and encrypting data encoded in CBOR. The COSE_Sign1 structure is the single-signer variant — one signature, one key, one envelope. OMS uses COSE_Sign1 as the signing wrapper for memory grains, as defined in Section 9.1 of the specification.
+
+The full structure:
+
+```
+COSE_Sign1 {
+  protected: {
+    1: -8,                              // alg: EdDSA (see note below)
+    4: "did:key:z6MkhaXg..."           // kid: signer DID
+    3: "application/vnd.mg+msgpack"    // content_type
+  },
+  unprotected: {
+    "iat": 1737000000                   // timestamp: epoch seconds
+  },
+  payload: <.mg blob bytes>,
+  signature: <Ed25519 signature, 64 bytes>
+}
+```
+
+Each field serves a specific role:
+
+**Protected headers** are included in the signature computation -- any modification invalidates the signature. They contain: `alg` (label 1, the signing algorithm -- EdDSA by default), `kid` (label 4, the signer's DID), and `content_type` (label 3, `"application/vnd.mg+msgpack"`).
+
+**Unprotected headers** are not covered by the signature. OMS places the `iat` (issued-at) timestamp here -- useful for logging but not relied upon for security decisions.
+
+**Payload** is the complete `.mg` blob bytes -- the 9-byte fixed header followed by the canonical MessagePack (or CBOR) payload.
+
+**Signature** is the Ed25519 signature, always 64 bytes, computed over the COSE Sig_structure per RFC 9052.
+
+### Five key points about signing
+
+Section 9.1 of the specification enumerates five key points that govern how signing interacts with the rest of OMS:
+
+1. **Signature wraps the complete `.mg` blob** — version byte + optional header + payload. The entire binary representation is signed.
+2. **Content address is still the inner blob's SHA-256 hash**, unchanged by signing. The COSE wrapper is external.
+3. **EdDSA (Ed25519) is the default algorithm; ES256 (ECDSA P-256) is the alternative.** Implementations may support both.
+4. **Signing is optional.** The `signed` flag in the grain's header (byte 1, bit 0) indicates whether a signature is present.
+5. **Signer identity is the DID in the `kid` field.** This is how the verifier knows whose public key to use.
+
+<Callout type="info">
+The specification includes an important note on EdDSA algorithm values: OMS uses COSE algorithm value `-8` (EdDSA), but the IANA COSE Algorithms registry has introduced more specific values — `-19` for Ed25519 and `-53` for Ed448 — via [RFC 9864](https://datatracker.ietf.org/doc/rfc9864/). These "fully specified" algorithm identifiers remove ambiguity about which curve is being used. Implementations MAY use `-19` instead of `-8` when Ed25519 is the only supported curve. Verifiers MUST accept both `-8` and `-19` for Ed25519 signatures.
+</Callout>
+
+## Signed flag and wrapper consistency
+
+One of the more subtle design decisions in OMS is the relationship between the `signed` flag inside the grain and the COSE wrapper outside it. Section 9.2 of the specification defines this clearly.
+
+The `signed` flag lives in **byte 1, bit 0** of the inner blob's fixed header. It is part of the immutable, content-addressed blob. The COSE_Sign1 wrapper is **external** to the blob — it wraps the blob but is not included in the SHA-256 content address.
+
+```
+[Inner .mg blob]                     [Outer COSE_Sign1 -- not content-addressed]
+|- Byte 1, bit 0: signed = 1         |- protected headers
+|- payload bytes                     |- unprotected headers
+'- content address = SHA-256(blob)   '- signature over inner blob bytes
+```
+
+This separation creates an invariant that parsers must enforce:
+
+- If `signed` = 1, the grain **MUST** be delivered wrapped in COSE_Sign1.
+- If `signed` = 0, the grain **MUST NOT** be wrapped.
+
+Parsers must reject with `ERR_SIGNED_MISMATCH` if the flag is 1 but no wrapper is present, or the flag is 0 but a wrapper is present. This prevents two classes of attack: stripping a signature from a signed grain (downgrade attack) and wrapping an unsigned grain in a forged signature (upgrade attack).
+
+### Content address stability
+
+A critical consequence of this design: **signing does not change the grain's content address.** The SHA-256 hash is computed over the inner blob bytes, and the COSE wrapper is external to those bytes. An unsigned delivery and a signed delivery of the same grain share the same content address.
+
+This means a grain can be verified by hash even if the signature is not checked, and a grain stored unsigned can later be wrapped in a signature without changing its identity. The content address is stable across the signing lifecycle.
+
+## Identity verification steps
+
+Section 9.3 defines the five-step process for verifying a signed grain:
+
+1. **Parse the COSE_Sign1 structure.** Extract the four components: protected headers, unprotected headers, payload, and signature.
+
+2. **Extract the `kid` (signer DID) from protected headers.** This is the identity claim — who asserts they created this grain.
+
+3. **Resolve the DID to a public key.** For `did:key`, the public key is embedded directly in the DID string (self-contained resolution). For `did:web`, resolution requires an HTTPS fetch to the domain specified in the DID.
+
+4. **Verify the signature over the payload.** Using the resolved public key and the algorithm specified in the protected headers, verify the Ed25519 (or ES256) signature. If verification fails, reject the grain.
+
+5. **Deserialize the payload to verify the content address.** Compute SHA-256 of the payload bytes (the inner `.mg` blob) and compare against the expected content address. This confirms both integrity (no tampering) and identity (the blob matches the signed content).
+
+<Callout type="security">
+Step 5 is not redundant with step 4. The signature proves that the signer endorsed specific bytes. The content address proves that those bytes match the grain's claimed identity. Without step 5, an attacker could substitute a different valid-but-wrong grain under the same signature context.
+</Callout>
+
+## DID-based identity
+
+Sections 12.1 and 12.2 of the specification explain why OMS uses W3C Decentralized Identifiers rather than traditional PKI (X.509 certificates, certificate authorities). The core motivation is **design principle 8: "Sign without PKI."** DIDs provide cryptographic identity verification without requiring certificate authorities, certificate chains, or centralized registries.
+
+[W3C DID Core 1.0](https://www.w3.org/TR/did-core/), which became a W3C Recommendation on July 19, 2022, defines a standard for globally unique identifiers that are decentralized, persistent, cryptographically verifiable, and resolvable.
+
+OMS supports two DID methods:
+
+### did:key (default)
+
+The `did:key` method embeds the public key directly in the identifier string. No network resolution is required — the DID itself contains everything needed for verification.
+
+```
+did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK
+```
+
+This is the default for OMS and the simplest identity model. An agent generates an Ed25519 key pair, encodes the public key as a `did:key`, and uses it as the `kid` in COSE Sign1 headers and the `author_did` in grain payloads.
+
+### did:web (enterprise)
+
+The `did:web` method resolves identity through DNS and HTTPS. An organization publishes a DID document at a well-known URL on its domain, binding organizational identity to cryptographic keys.
+
+```
+did:web:example.com:agents:summarizer
+```
+
+This method is suited for enterprise deployments where agents need organizational identity — "this grain was created by a summarizer agent operated by example.com." Resolution requires fetching the DID document from `https://example.com/agents/summarizer/did.json`, which introduces a network dependency but provides DNS-anchored identity.
+
+## Three orthogonal identity fields
+
+Section 12.3 of the specification defines three identity-related fields that serve distinct, non-overlapping purposes:
+
+| Field | Purpose | Example | Used By |
+|-------|---------|---------|---------|
+| `author_did` | Agent identity -- who created this grain | `did:key:z6Mk...` | COSE signature verification, audit trail |
+| `user_id` | Data subject -- whose personal data | `"alice-42"`, `"patient-789"` | GDPR erasure, per-user encryption |
+| `namespace` | Logical partition -- grouping | `"work"`, `"robotics:arm-7"` | Query scoping, access control |
+
+These fields are **orthogonal**: `author_did` answers "who created this grain?" (cryptographic identity, verified via COSE signature); `user_id` answers "whose personal data is this?" (the natural person who is the data subject); and `namespace` answers "what logical partition does this belong to?" (query scoping and access control). The same agent may create grains for many users across many namespaces, and the same user may have data created by multiple agents.
+
+### User ID and compliance
+
+Section 12.4 explains the specific compliance context of `user_id`. Unlike `author_did` (which identifies agents) and `namespace` (which groups data), `user_id` is specifically for identifying natural persons under data protection regulations such as GDPR, CCPA, and HIPAA.
+
+The presence of a `user_id` triggers several compliance mechanisms:
+
+- **Per-person encryption** via HKDF key derivation. Each user's grains are encrypted with a key derived from the user's ID and a master key.
+- **Erasure proofs** via crypto-erasure. Destroying the user's derived key renders all their ciphertexts unrecoverable, enabling O(1) GDPR Article 17 compliance.
+- **Per-person consent tracking.** The `user_id` links grains to consent records.
+- **Blind index lookups** via HMAC tokens. Systems can search for a user's grains without exposing the plaintext user ID, using `HMAC(key, user_id)` as a search token.
+
+For non-person data — seasonal patterns, device state, system configuration — `user_id` is simply omitted. The `namespace` field handles logical grouping for non-personal data.
+
+## Parsing did:key
+
+Section 22.4 of the specification provides the step-by-step process for parsing a `did:key` identifier to extract the public key bytes needed for signature verification:
+
+```
+Format: did:key:z<multibase-base58-btc-encoded-multicodec-key>
+
+Example: did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK
+```
+
+The parsing process:
+
+1. **Remove the `did:key:` prefix.** This leaves the multibase-encoded key: `z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK`.
+
+2. **Decode multibase.** The `z` prefix indicates base58-btc encoding (the same encoding used in Bitcoin addresses). Decode the remaining characters to raw bytes.
+
+3. **Read the multicodec prefix.** The first bytes identify the key type using unsigned varint encoding:
+   - Ed25519 public key: prefix `0xed 0x01` (2-byte varint), followed by 32 key bytes
+   - Other key types use different varint values; always decode the full varint, not a fixed byte count
+
+4. **Extract the public key bytes.** Everything after the varint prefix is the raw public key — 32 bytes for Ed25519.
+
+5. **Verify the signature** using the extracted public key and the algorithm from the COSE protected headers.
+
+<Callout type="warning">
+The multicodec prefix uses varint encoding, not fixed-length encoding. While Ed25519 uses the 2-byte prefix `0xed 0x01`, other key types may use different-length prefixes. Implementations must decode the full varint rather than assuming a fixed 2-byte prefix. The [did:key method specification](https://w3c-ccg.github.io/did-key-spec/) maintained by the W3C Credentials Community Group provides the authoritative reference.
+</Callout>
+
+## COSE Sign1 libraries
+
+Section 22.5 of the specification lists reference libraries for implementing COSE Sign1 across languages:
+
+| Language | Library | Notes |
+|----------|---------|-------|
+| Python | `pycose` | RFC 9052 compliant |
+| Go | `github.com/veraison/go-cose` | COSE structures and signing |
+| JavaScript | `cose-js`, `cbor-x` | COSE operations and CBOR encoding |
+| Rust | `cosey` | COSE data types and operations |
+
+These libraries handle COSE_Sign1 structure creation, Sig_structure construction, and signature verification, letting implementations focus on key management and DID resolution.
+
+## A signed grain lifecycle
+
+To make the signing architecture concrete, here is the lifecycle of a signed grain from creation through verification.
+
+**Creation:**
+
+1. The agent creates a grain and the serializer applies canonical rules (Section 4): NFC normalization, lexicographic key sorting, null omission, field compaction.
+2. The 9-byte fixed header is prepended with the `signed` flag (byte 1, bit 0) set to 1.
+3. SHA-256 is computed over the complete blob -- this is the grain's content address and it will not change.
+4. The blob is wrapped in COSE_Sign1: protected headers carry the algorithm (`-8` for EdDSA), the signer's DID (as `kid`), and the content type. The Ed25519 signature (64 bytes) is computed over the Sig_structure.
+
+**Storage:**
+
+The store verifies the signature, extracts the inner blob, verifies the content address, and stores the blob by content address. The COSE wrapper may be stored alongside the blob or separately.
+
+**Verification (by a different system):**
+
+1. Parse the COSE_Sign1 structure and extract `kid` (the signer's DID) from protected headers.
+2. Parse the `did:key`: decode base58-btc, read multicodec prefix `0xed 0x01`, extract 32-byte Ed25519 public key.
+3. Verify the Ed25519 signature using the extracted public key.
+4. Extract the payload (inner `.mg` blob), compute SHA-256, and compare against the expected content address.
+5. Check that byte 1, bit 0 (`signed` flag) is 1. If not, reject with `ERR_SIGNED_MISMATCH`.
+6. Deserialize the MessagePack payload. The grain is now verified for both integrity and authenticity.
+
+## Design tradeoffs
+
+The OMS signing architecture makes several deliberate tradeoffs:
+
+**Ed25519 over RSA.** Ed25519 produces 64-byte signatures (vs. 256+ bytes for RSA-2048), offers faster signing and verification, and has simpler key generation. For a new specification targeting modern systems, Ed25519 is the natural default.
+
+**DIDs over X.509.** X.509 certificates require certificate authorities, certificate chains, and revocation infrastructure. DIDs are self-issued (`did:key`) or domain-anchored (`did:web`), requiring no central authority. The tradeoff is the absence of a built-in trust hierarchy — applications must establish their own trust policies for which DIDs to accept.
+
+**COSE over JWS/JOSE.** COSE operates on binary (CBOR) payloads natively, aligning with OMS's binary-first design. JWS (JSON Web Signatures) is designed for JSON payloads and would require base64 encoding of the binary blob, adding overhead and complexity.
+
+**Wrapper is external to content address.** The COSE envelope is not included in the SHA-256 hash. The same grain has the same content address whether signed or unsigned, enabling deduplication across deliveries. The tradeoff is that the signature must be stored and transmitted alongside the blob.
+
+## When to sign
+
+The specification makes signing optional — it adds computational cost, storage overhead (64-byte signature plus COSE headers), and key management complexity. Signing is most valuable when:
+
+- **Grains cross trust boundaries.** Agent-to-agent sharing, cross-organizational exchange, or publication to external systems.
+- **Audit compliance requires authenticity.** Regulatory frameworks (SOX, HIPAA) that require proof of who created a record.
+- **Grain protection policies reference specific DIDs.** The `invalidation_policy` field (Section 23) uses `authorized` DID lists — these only work if grains are signed by identifiable DIDs.
+- **Provenance chains need verification.** Signatures at each step in a derivation history provide non-repudiation.
+
+For intra-system grains that never leave a trusted perimeter, the content address alone may provide sufficient integrity, and signing can be deferred until export or sharing.

@@ -1,0 +1,452 @@
+---
+title: "Agent Memory for Manufacturing and Industrial IoT: Sensors, Predictive Maintenance, and Edge Intelligence"
+description: "Factories generate thousands of sensor readings per second. The Open Memory Specification maps this data to Observations for sensor telemetry, Facts for equipment knowledge, Workflows for learned SOPs, and Checkpoints for shift handoff — with device profiles from 512-byte microcontrollers to cloud-scale analytics."
+date: "2026-02-19"
+readTime: "13 min read"
+tags: ["manufacturing", "iot", "sensors", "edge-computing", "industry"]
+---
+
+A CNC machine on the factory floor starts vibrating at an unusual frequency. The vibration sensor detects it. Thirty seconds later, a temperature sensor on the same spindle reports a two-degree rise. A quality inspection camera catches a subtle surface defect on the part being machined. Three data points, three sensors, one emerging pattern — and the maintenance agent that should connect them has no structured way to correlate sensor readings, learn from past failures, or hand off its understanding when the shift changes.
+
+Manufacturing and industrial IoT environments generate enormous volumes of sensor data, but the challenge is not collection — it is turning readings into knowledge, tracking what that knowledge means for equipment health, learning maintenance procedures from observed patterns, and doing all of this across devices ranging from microcontrollers to cloud analytics platforms.
+
+The Open Memory Specification provides a structured memory model that spans this entire range. Observations capture raw sensor telemetry with spatial and temporal context. Facts store learned equipment knowledge. Workflows encode maintenance procedures. Checkpoints preserve production state across shifts. And device profiles (Section 18) define how these grains scale from a 512-byte PLC to a full cloud deployment.
+
+## The manufacturing memory challenge
+
+Factory environments present unique requirements that general-purpose memory systems struggle with:
+
+**High-volume, high-frequency data.** A single production line might have hundreds of sensors — temperature, vibration, pressure, flow rate, power consumption — each reporting multiple times per second. Memory must be lightweight enough for this volume.
+
+**Spatial and temporal correlation.** A temperature reading is meaningless without knowing which machine, which component, and what time. Readings from multiple sensors at the same moment must be correlatable.
+
+**Predictive maintenance.** Raw sensor data must be transformed into equipment knowledge: "This bearing typically fails within 200 hours when vibration exceeds this threshold." That knowledge must track its confidence and provenance back to the observations that informed it.
+
+**Shift handoff.** A production line does not stop between shifts. The incoming crew needs to know the current state: what batch is running, what issues have occurred, what the quality metrics look like, and what maintenance is pending.
+
+**Heterogeneous devices.** The same memory format must work on a constrained PLC with kilobytes of RAM, an edge gateway with a few gigabytes, and a cloud analytics server with effectively unlimited resources.
+
+## Observations for factory sensors
+
+The Observation memory type (Section 8.6) is purpose-built for sensor data. Its required fields are deliberately minimal: `type`, `observer_id`, `observer_type`, and `created_at`.
+
+A temperature reading on the factory floor:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "temp-sensor-01",
+  "observer_type": "temperature",
+  "subject": "CNC-machine-7",
+  "object": "22.5C",
+  "confidence": 0.99,
+  "created_at": 1768471200000,
+  "namespace": "factory:building-a:line-3",
+  "importance": 0.3
+}
+```
+
+This follows the spec's Test Vector 5 pattern (Section 21.5) — `observer_id` identifies the specific device, `observer_type` categorizes the measurement, `subject` names the observed entity, and `object` records the value. The default `importance` of 0.3 for Observations (Section 8.6) reflects the reality that most individual sensor readings are routine. Only anomalies elevate in importance.
+
+Vibration and pressure sensors follow the same structure:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "vib-sensor-07",
+  "observer_type": "vibration",
+  "subject": "CNC-machine-7",
+  "object": "4.2mm/s",
+  "confidence": 0.98,
+  "created_at": 1768471200000,
+  "namespace": "factory:building-a:line-3",
+  "frame_id": "machine-7:spindle",
+  "importance": 0.3
+}
+```
+
+```json
+{
+  "type": "observation",
+  "observer_id": "press-sensor-03",
+  "observer_type": "pressure",
+  "subject": "CNC-machine-7",
+  "object": "6.8bar",
+  "confidence": 0.97,
+  "created_at": 1768471200000,
+  "namespace": "factory:building-a:line-3",
+  "frame_id": "machine-7:hydraulic-system"
+}
+```
+
+### sync_group for synchronized readings
+
+When multiple sensors capture data at the same moment — all sensors on machine-7 during a diagnostic snapshot, for example — the `sync_group` field (Section 8.6) ties them together:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "temp-sensor-01",
+  "observer_type": "temperature",
+  "subject": "CNC-machine-7",
+  "object": "22.5C",
+  "confidence": 0.99,
+  "created_at": 1768471200000,
+  "sync_group": "machine-7-diagnostic-20260115-100000",
+  "namespace": "factory:building-a:line-3"
+}
+```
+
+Every Observation in the same `sync_group` was captured at the same logical moment. This is essential for correlation: when analyzing what led to a failure, you need the full sensor picture at each point in time, not individual readings scattered across a timeline.
+
+### frame_id for spatial context
+
+The `frame_id` field provides coordinate or spatial reference for each reading. In a factory context, this maps to the physical location on a machine or production line:
+
+- `"machine-7:spindle"` — the spindle assembly of CNC machine 7
+- `"assembly-line-3:station-5"` — station 5 on assembly line 3
+- `"machine-7:hydraulic-system"` — the hydraulic subsystem
+
+This spatial tagging enables queries like "show me all temperature readings from machine-7's spindle in the last 24 hours" without parsing the full payload of every Observation.
+
+### Quality inspection cameras
+
+Visual inspection data uses Observations with `content_refs` (Section 7.1) to reference the captured images:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "qc-camera-02",
+  "observer_type": "camera",
+  "subject": "part-batch-2026-0115-A",
+  "object": "surface_defect_detected",
+  "confidence": 0.87,
+  "created_at": 1768471200000,
+  "namespace": "factory:building-a:line-3",
+  "frame_id": "assembly-line-3:station-5",
+  "content_refs": [
+    {
+      "uri": "cas://sha256:b7e3f1...",
+      "modality": "image",
+      "mime_type": "image/jpeg",
+      "size_bytes": 3145728,
+      "checksum": "sha256:b7e3f1...",
+      "metadata": {"width": 4032, "height": 3024}
+    }
+  ]
+}
+```
+
+The image itself is never embedded in the grain (Design Principle 1: "References, not blobs"). The `content_refs` entry includes the `checksum` for integrity verification — when the image is fetched, the SHA-256 hash of the retrieved bytes must match the declared checksum. The `metadata` map carries modality-specific information: width and height for images, sample rate and duration for audio, and so on (Section 7.3).
+
+<Callout type="info">
+When the `has_content_refs` flag (bit 3) is set in the grain's header flags byte, consumers know before deserialization that external content is referenced. Combined with the type byte `0x06` (Observation) in the header, a system can identify "sensor reading with attached media" at the binary level without parsing the MessagePack payload.
+</Callout>
+
+## Facts for equipment knowledge
+
+Raw Observations are valuable for real-time monitoring, but the lasting value comes from what agents learn from them. Equipment knowledge is captured as Fact grains:
+
+```json
+{
+  "type": "fact",
+  "subject": "CNC-machine-7",
+  "relation": "requires_maintenance",
+  "object": "spindle_bearing_replacement",
+  "confidence": 0.85,
+  "source_type": "agent_inferred",
+  "created_at": 1768471500000,
+  "namespace": "factory:building-a:line-3",
+  "derived_from": ["<vibration-observation-hash>", "<temperature-observation-hash>"],
+  "provenance_chain": [
+    {
+      "source_hash": "<vibration-observation-hash>",
+      "method": "pattern_analysis",
+      "weight": 0.7
+    },
+    {
+      "source_hash": "<temperature-observation-hash>",
+      "method": "correlation",
+      "weight": 0.3
+    }
+  ]
+}
+```
+
+The `source_type` of `"agent_inferred"` (Section 6.1) indicates this knowledge was derived by an AI agent, not stated by a human or imported from a database. The `derived_from` array contains the content addresses of the specific Observation grains that informed this inference. The `provenance_chain` records the analytical methods used and how much each source contributed.
+
+This provenance is critical in manufacturing. When a maintenance recommendation turns out to be correct, the full chain from raw sensor data to inference is available. When it turns out to be wrong, the same chain enables root-cause analysis of the false positive.
+
+The `confidence` field tracks how certain the agent is. An initial inference at 0.85 might rise to 0.95 as additional sensor readings corroborate the pattern, or drop to 0.4 if subsequent data contradicts it. Each confidence update creates a new Fact grain that supersedes the previous one — the supersession chain preserves the full evolution of the agent's belief.
+
+## Workflows for learned standard operating procedures
+
+One of the most valuable capabilities in manufacturing AI is learning procedures from observing human operators. When a skilled machinist handles an unusual vibration — reducing spindle speed, checking the coolant flow, inspecting the workpiece — the agent can encode this observed procedure as a Workflow grain (Section 8.4):
+
+```json
+{
+  "type": "workflow",
+  "trigger": "vibration_exceeds_threshold",
+  "steps": [
+    "reduce_spindle_speed",
+    "alert_maintenance",
+    "log_incident",
+    "schedule_inspection"
+  ],
+  "created_at": 1768471200000,
+  "importance": 0.7,
+  "namespace": "factory:building-a:line-3"
+}
+```
+
+The `trigger` field defines the condition that activates the workflow. The `steps` array encodes the ordered sequence of actions. As the agent observes more instances of this procedure — different operators handling similar situations — it can refine the Workflow through supersession, adding or reordering steps based on observed outcomes.
+
+More complex procedures can be learned for specific scenarios:
+
+```json
+{
+  "type": "workflow",
+  "trigger": "quality_defect_rate_above_threshold",
+  "steps": [
+    "pause_production_line",
+    "run_calibration_sequence",
+    "inspect_last_50_parts",
+    "adjust_tool_offset",
+    "resume_with_increased_inspection_frequency"
+  ],
+  "created_at": 1768471200000,
+  "importance": 0.7,
+  "namespace": "factory:building-a:line-3"
+}
+```
+
+The Workflow type requires only `type`, `steps` (non-empty array), `trigger` (non-empty string), and `created_at`. This minimal schema keeps workflow definitions lean while the `importance` field (default 0.7 for Workflows) signals that procedural knowledge is higher-value than raw observations.
+
+## Checkpoints for production line state
+
+Shift handoff is a critical moment in manufacturing. The Checkpoint type (Section 8.3) captures a complete snapshot of production state:
+
+```json
+{
+  "type": "checkpoint",
+  "context": {
+    "current_batch": "batch-2026-0115-A",
+    "parts_completed": "847",
+    "parts_target": "1000",
+    "defect_count": "3",
+    "defect_rate": "0.0035",
+    "machine_status": "running",
+    "pending_maintenance": "CNC-machine-7:spindle_bearing",
+    "coolant_level": "78_percent",
+    "shift": "day_shift",
+    "operator": "operator-22"
+  },
+  "created_at": 1768500000000,
+  "plan": [
+    "Complete remaining 153 parts in batch",
+    "Monitor CNC-machine-7 vibration levels",
+    "Schedule spindle bearing replacement at next planned downtime"
+  ],
+  "history": [
+    {"action": "adjusted_tool_offset", "time": "1768485000000", "result": "defect_rate_reduced"},
+    {"action": "replaced_coolant_filter", "time": "1768492000000", "result": "temperature_stabilized"}
+  ]
+}
+```
+
+The `context` map captures the current state. The `plan` array lists pending actions. The `history` array records what happened during the shift. An incoming shift operator — human or AI — gets the full picture in a single Checkpoint grain.
+
+## Goals for production targets
+
+Production targets are natural Goal grains, with `criteria_structured` (Section 8.7) enabling machine-evaluable success conditions:
+
+```json
+{
+  "type": "goal",
+  "subject": "production-line-3",
+  "description": "Maintain defect rate below 2% for current production run",
+  "goal_state": "active",
+  "source_type": "system",
+  "created_at": 1768471200000,
+  "criteria_structured": [
+    {
+      "metric": "defect_rate",
+      "operator": "lt",
+      "threshold": 0.02,
+      "window_ms": 86400000,
+      "measurement_ns": "factory:building-a:line-3"
+    }
+  ],
+  "priority": 2,
+  "namespace": "factory:building-a:line-3"
+}
+```
+
+The `criteria_structured` schema (Section 8.7) supports `metric`, `operator` (one of `"lt"`, `"gt"`, `"lte"`, `"gte"`, `"eq"`, `"neq"`), `threshold`, `window_ms` (measurement evaluation window), and `measurement_ns` (the namespace or system to query). The `window_ms` of 86400000 (24 hours) means the defect rate is evaluated over a rolling daily window.
+
+## ToolCalls for PLC commands and SCADA APIs
+
+When an agent issues commands to programmable logic controllers (PLCs) or makes SCADA API calls, these are recorded as ToolCall grains:
+
+```json
+{
+  "type": "tool_call",
+  "tool_name": "plc_set_spindle_speed",
+  "arguments": {"machine_id": "CNC-machine-7", "target_rpm": 8000, "ramp_time_ms": 5000},
+  "result": {"status": "acknowledged", "actual_rpm": 8000, "settled_at_ms": 1768471205000},
+  "success": true,
+  "duration_ms": 5230,
+  "created_at": 1768471200000,
+  "namespace": "factory:building-a:line-3"
+}
+```
+
+```json
+{
+  "type": "tool_call",
+  "tool_name": "scada_query_historical",
+  "arguments": {"machine_id": "CNC-machine-7", "metric": "vibration", "window_hours": 48},
+  "result": {"data_points": 172800, "max_value": "5.1mm/s", "avg_value": "2.3mm/s", "trend": "increasing"},
+  "success": true,
+  "duration_ms": 890,
+  "created_at": 1768471200000,
+  "namespace": "factory:building-a:line-3"
+}
+```
+
+Every PLC command is recorded with its arguments, result, success status, and execution duration. This creates a complete audit trail of every automated action taken on the factory floor.
+
+## Device profiles: from microcontroller to cloud
+
+Manufacturing environments span an enormous range of compute capabilities. OMS device profiles (Section 18) define three tiers that map directly to factory infrastructure.
+
+### Lightweight profile (512 bytes) for PLCs and microcontrollers
+
+A programmable logic controller or a microcontroller-based sensor node operates under extreme constraints: limited RAM, no filesystem, battery power. The Lightweight profile (Section 18.3) is designed for this:
+
+- **Max blob size:** 512 bytes
+- **Hash function:** SHA-256 (hardware accelerator recommended)
+- **Fields:** Required fields only — `type`, `subject`, `relation`, `object`, `confidence`, `created_at`, `namespace`
+- **Omitted:** `context`, `derived_from`, `provenance_chain`, `content_refs`, `embedding_refs`
+- **Encryption:** Transport-level only (DTLS/TLS)
+- **Deserialization:** Streaming recommended (no full-blob-in-memory)
+
+A Lightweight Observation from a temperature sensor might be:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "temp-sensor-01",
+  "observer_type": "temperature",
+  "created_at": 1768471200000,
+  "namespace": "factory:building-a:line-3"
+}
+```
+
+Just the absolute minimum: what kind of reading, from which sensor, when, and where. No provenance chain, no content references, no embedding references. The grain fits comfortably within the 512-byte limit. Encryption happens at the transport layer (DTLS for UDP, TLS for TCP), not at the grain level.
+
+<Callout type="info">
+The Lightweight profile relies on transport-level encryption rather than per-grain AES-256-GCM. This is a deliberate trade-off: constrained devices lack the compute resources for per-grain encryption, and transport-level security (DTLS/TLS) is well-supported by most microcontroller networking stacks.
+</Callout>
+
+### Standard profile (32 KB) for edge gateways and SBCs
+
+Edge gateways and single-board computers (Raspberry Pi-class devices) that aggregate sensor data from multiple nodes use the Standard profile (Section 18.2):
+
+- **Max blob size:** 32 KB
+- **Hash function:** SHA-256
+- **Fields:** All fields supported
+- **Encryption:** AES-256-GCM
+- **Vector search:** Optional
+
+At this tier, full provenance chains, content references, and per-grain encryption are available. The edge gateway can receive Lightweight grains from sensor nodes, enrich them with spatial context (`frame_id`, `sync_group`), attach content references (inspection images), and forward enriched grains upstream.
+
+### Extended profile (1 MB) for cloud analytics
+
+The cloud tier uses the Extended profile (Section 18.1):
+
+- **Max blob size:** 1 MB
+- **Hash function:** SHA-256
+- **Fields:** All fields supported
+- **Encryption:** AES-256-GCM
+- **Full feature set**
+
+Cloud analytics can store large Checkpoint grains with full production state, maintain extensive provenance chains linking thousands of Observations to derived Facts, and run embedding-based similarity search across the entire grain corpus.
+
+## Content refs for inspection images
+
+Quality inspection generates image data that must be linked to the inspection Observation without being embedded in it. The `content_refs` schema (Section 7.1) provides this:
+
+```json
+{
+  "content_refs": [
+    {
+      "uri": "cas://sha256:b7e3f1...",
+      "modality": "image",
+      "mime_type": "image/jpeg",
+      "size_bytes": 3145728,
+      "checksum": "sha256:b7e3f1...",
+      "metadata": {"width": 4032, "height": 3024}
+    }
+  ]
+}
+```
+
+The `checksum` field is critical in manufacturing: it ensures the image has not been altered since the inspection. If a quality dispute arises, the SHA-256 checksum in the grain can be verified against the stored image. Any byte-level change — compression artifact, metadata stripping, or deliberate tampering — produces a different checksum and fails verification.
+
+For point cloud data from 3D scanners, the same pattern applies with different modality metadata:
+
+```json
+{
+  "content_refs": [
+    {
+      "uri": "cas://sha256:c9d2e4...",
+      "modality": "point_cloud",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 52428800,
+      "checksum": "sha256:c9d2e4...",
+      "metadata": {"point_count": 1234567, "format": "pcd_binary", "has_color": true}
+    }
+  ]
+}
+```
+
+## The predictive maintenance pipeline
+
+The full predictive maintenance workflow chains OMS memory types together:
+
+**Step 1 — Observe.** Sensors generate Observation grains continuously. Temperature, vibration, pressure, power consumption — each reading is a grain with `observer_id`, `observer_type`, `frame_id`, and `sync_group` for correlation.
+
+**Step 2 — Detect.** An edge agent monitors Observation streams and detects anomalies: vibration exceeding baseline, temperature trending upward, correlated readings across multiple sensors. These anomalies are themselves Observations with elevated `importance`.
+
+**Step 3 — Infer.** The agent creates Fact grains representing equipment knowledge: `subject="CNC-machine-7"`, `relation="requires_maintenance"`, `object="spindle_bearing_replacement"`. The `source_type` is `"agent_inferred"` and `confidence` reflects the strength of the evidence. The `derived_from` array points to the specific Observation grains.
+
+**Step 4 — Track confidence.** As additional sensor data arrives, the agent updates its belief. Each update creates a new Fact grain that supersedes the previous one. Confidence rises (corroborating data) or falls (contradicting data). The supersession chain preserves the complete evolution of the prediction.
+
+**Step 5 — Learn procedures.** When maintenance is performed — either by a human operator or an automated system — the agent records the procedure as a Workflow grain. Over time, repeated observations of similar procedures refine the Workflow through supersession.
+
+**Step 6 — Verify.** After maintenance, the agent monitors post-maintenance Observations. If vibration drops back to baseline and the defect rate falls, the maintenance Fact's `success_count` increments. If the problem persists, `failure_count` increments, signaling that the diagnosis may have been wrong or the repair insufficient.
+
+This pipeline creates a self-improving maintenance system. Each cycle — observe, infer, act, verify — leaves a complete, auditable, content-addressed trail from raw sensor data through inference to action and outcome.
+
+## Namespace strategy for hierarchical partitioning
+
+Factory environments benefit from hierarchical namespace partitioning:
+
+- `"factory:building-a"` — all data from building A
+- `"factory:building-a:line-3"` — production line 3 in building A
+- `"factory:building-a:line-3:machine-7"` — specific machine within line 3
+
+The namespace hash in the grain header (bytes 3-4, the first two bytes of SHA-256 of the namespace string) enables efficient routing without deserialization. A monitoring dashboard for line 3 can filter to `"factory:building-a:line-3"` grains at the binary level. A machine-specific diagnostic view narrows further to `"factory:building-a:line-3:machine-7"`.
+
+<Callout type="warning">
+The namespace hash provides 65,536 routing buckets (Section 3.1.1). Different namespace strings may hash to the same two-byte prefix — the hash is a routing hint, not an authoritative identifier. The full namespace string in the payload remains authoritative for exact matching. For factories with thousands of namespace partitions, collisions in the 16-bit hash space are expected and handled by payload inspection after the initial binary filter.
+</Callout>
+
+This hierarchical scheme also maps naturally to access control. A plant manager sees `"factory:*"`. A line supervisor sees `"factory:building-a:line-3:*"`. A machine operator sees only their assigned machine's namespace. The namespace is the natural boundary for memory scoping in manufacturing environments.
+
+## From sensor floor to production intelligence
+
+The gap between raw sensor data and actionable manufacturing intelligence is not a technology problem — it is a memory problem. Factories have sensors. They have data. What they lack is a structured way to transform readings into knowledge, track that knowledge over time, learn procedures from observed patterns, and preserve state across shifts and system boundaries.
+
+OMS provides the structure. Observations capture what sensors see. Facts record what agents learn. Workflows encode what should be done. Checkpoints preserve where things stand. Goals define what must be achieved. And device profiles ensure this works from a 512-byte microcontroller at the sensor level through an edge gateway to a cloud analytics platform — the same grain format, the same content addressing, the same immutability guarantees, at every tier of the industrial stack.

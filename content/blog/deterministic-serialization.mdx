@@ -1,0 +1,258 @@
+---
+title: "Deterministic Serialization: How OMS Guarantees Identical Bytes"
+description: "A deep dive into the canonical serialization rules in Section 4 of the Open Memory Specification — key ordering, integer encoding, float constraints, NFC normalization, and the full 10-step algorithm that ensures two independent implementations always produce the same bytes."
+date: "2026-02-19"
+readTime: "14 min read"
+tags: ["serialization", "canonical", "deterministic", "technical"]
+---
+
+The entire integrity model of the Open Memory Specification rests on a single guarantee: **two independent implementations, given identical input, must produce identical bytes**. If the bytes are identical, the SHA-256 content address is identical. If the content address is identical, grains can be verified, deduplicated, and linked across any system, any language, any platform.
+
+This is not a nice-to-have. It is the foundation. And achieving it requires a precise set of canonical serialization rules defined in Section 4 of the OMS v1.0 specification.
+
+This post walks through every rule in detail.
+
+## Why Determinism Matters
+
+Consider two agents — one written in Python, one in Rust — that both create the same Fact grain: "Alice works at ACME Corp." If the Python serializer encodes map keys in insertion order and the Rust serializer encodes them alphabetically, they produce different bytes. Different bytes mean different SHA-256 hashes. Different hashes mean two "identical" facts that cannot be recognized as the same grain.
+
+Content addressing breaks. Deduplication breaks. Provenance chains that reference grains by hash become disconnected. The entire system degrades into platform-specific silos — the exact problem OMS was designed to solve.
+
+Canonical serialization eliminates this class of bugs by specifying exactly how every data type is encoded. There is one correct byte sequence for any given grain, and every compliant implementation must produce it.
+
+## Rule 1: Key Ordering (Section 4.1)
+
+Map keys MUST be sorted **lexicographically by their UTF-8 byte representation**. This applies recursively to all nested maps. Ordering is case-sensitive and treats bytes as unsigned integers.
+
+The spec provides an explicit correct vs. wrong example:
+
+```
+CORRECT ordering:   {"adid": ..., "c": ..., "ca": ..., "ns": ..., "o": ..., "r": ..., "s": ..., "st": ..., "t": ...}
+WRONG ordering:     {"s": ..., "c": ..., "ca": ..., "adid": ..., ...}
+```
+
+The comparison algorithm is straightforward: compare byte 0 of key A with byte 0 of key B. If equal, advance to byte 1, and so on. Shorter keys sort before longer keys when all leading bytes are equal (since there are no more bytes to compare).
+
+Two additional constraints:
+
+- **Map keys MUST be unique within a map.** Duplicate keys MUST be rejected with `ERR_CORRUPT`.
+- **Sorting is recursive.** If a value is itself a map (like `context` or `arguments`), its keys must also be sorted.
+
+<Callout type="warning">
+Insertion order is a common default in many languages (Python dicts, JavaScript objects, Rust IndexMap). Serializers MUST re-sort keys before encoding, not rely on the order they were added.
+</Callout>
+
+## Rule 2: Integer Encoding (Section 4.2)
+
+Integers MUST use the **smallest MessagePack representation** for their value. This eliminates ambiguity where the same number could be encoded in multiple ways.
+
+| Range | MessagePack Encoding | Size |
+|-------|---------------------|------|
+| 0 to 127 | positive fixint | 1 byte |
+| -32 to -1 | negative fixint | 1 byte |
+| 128 to 255 | uint8 | 2 bytes |
+| 256 to 65,535 | uint16 | 3 bytes |
+| -128 to -33 | int8 | 2 bytes |
+| -32,768 to -129 | int16 | 3 bytes |
+
+For example, the integer `42` must be encoded as a positive fixint (1 byte: `0x2a`), not as a uint8 (2 bytes: `0xcc 0x2a`) or a uint16 (3 bytes: `0xcd 0x00 0x2a`). All three decode to the same value, but they produce different bytes — and therefore different content addresses.
+
+For CBOR encoding, the equivalent rule is to follow RFC 8949 Section 4.2.1 (Preferred Encoding).
+
+## Rule 3: Float Encoding (Section 4.3)
+
+Floating-point numbers MUST be encoded as **IEEE 754 double precision (float64, 8 bytes)** in MessagePack format. Single-precision float32 MUST NOT be used. In CBOR, use major type 7 with additional information value 27 (64-bit IEEE 754).
+
+More critically: **Float64 values MUST NOT be NaN or Infinity.** Serializers MUST reject non-finite values with `ERR_FLOAT_INVALID`.
+
+Why this restriction? IEEE 754 permits **multiple NaN bit patterns**. The sign bit, exponent bits, and mantissa bits of a NaN can vary — a "quiet NaN" and a "signaling NaN" are both NaN, but they have different bit patterns. Different bit patterns produce different byte sequences in MessagePack encoding, which produce different SHA-256 hashes. Two implementations that both store "NaN" could produce different content addresses.
+
+The same ambiguity applies to positive and negative infinity (though less severely). By rejecting all non-finite values, OMS eliminates this entire category of cross-implementation divergence.
+
+<Callout type="info">
+In practice, the `confidence` and `importance` fields are the most common floats in OMS grains. Both are constrained to the range [0.0, 1.0], so NaN and Infinity would be semantically invalid anyway. The rule formalizes what would already be a bug.
+</Callout>
+
+## Rule 4: String Encoding (Section 4.4)
+
+All strings — both keys and values — MUST be **UTF-8 encoded** and MUST be **NFC-normalized** (Unicode Normalization Form Canonical Composition, per UAX #15) before encoding.
+
+NFC normalization ensures that characters with multiple valid Unicode representations are collapsed to a single canonical form. The spec provides this example:
+
+```
+Combining character:  e + \u0301 (combining acute accent)
+NFC-normalized form:  \u00e9 (é — precomposed character)
+```
+
+Without normalization, the two-codepoint sequence `e` + `\u0301` and the single codepoint `\u00e9` both render as "e" but produce different bytes. NFC normalization converts the combining form to the precomposed form, ensuring a single byte representation.
+
+Additionally, strings MUST NOT contain a **byte-order mark** (BOM, bytes `EF BB BF`). Parsers MUST reject strings beginning with a BOM with `ERR_CORRUPT`. BOMs are a legacy artifact from UTF-16 encoding and have no place in a deterministic binary format.
+
+## Rule 5: Null Omission (Section 4.5)
+
+Map entries with null/None/nil values MUST be **omitted entirely** from the serialized form. They are not encoded as MessagePack nil — they are simply absent from the map.
+
+When a field is absent, it defaults to:
+
+| Type | Default |
+|------|---------|
+| Strings | None or empty |
+| Numbers | 0 or 0.0 |
+| Booleans | false |
+| Arrays | empty list |
+| Maps | None |
+
+However, the spec makes an important semantic distinction: **absent fields are semantically distinct from fields explicitly set to a default value.** Consumers MUST NOT treat an absent field as equivalent to a field present with its default value.
+
+This has a critical implication for serializers: **Serializers MUST NOT auto-insert default values during round-trip serialization.** If a grain was created without a `confidence` field, and a deserializer defaults it to `0.0`, the serializer must not write `"c": 0.0` back into the output. Doing so changes the blob bytes and produces a different content address.
+
+<Callout type="warning">
+This is a subtle but important rule. Many serialization libraries automatically fill in defaults during deserialization. An OMS implementation must track which fields were explicitly present in the original blob and which were absent, preserving that distinction through round-trip serialization.
+</Callout>
+
+The rationale is threefold:
+
+1. **Forward compatibility** — When the spec adds new optional fields in future versions, existing grains' hashes remain unchanged because absent fields were never serialized.
+2. **Determinism** — No ambiguity between "field was absent" and "field was null."
+3. **Compactness** — Fewer bytes in the output.
+
+## Rule 6: Array Ordering (Section 4.6)
+
+Array elements MUST **preserve insertion order**. Arrays are NOT sorted.
+
+This is the complement to Rule 1 (key ordering). While map keys are sorted lexicographically, arrays maintain the order their elements were added. This is important for fields like `provenance_chain` (where order implies derivation sequence), `plan` (where order implies execution sequence), and `steps` (where order defines workflow progression).
+
+Sorting arrays would destroy semantic information. The first step in a workflow is not interchangeable with the last.
+
+## Rule 7: Nested Compaction (Section 4.7)
+
+Three fields use **nested field compaction**, meaning the maps inside their arrays also have their keys replaced with short forms:
+
+- `content_refs` — uses CONTENT_REF_FIELD_MAP (Section 7.1)
+- `embedding_refs` — uses EMBEDDING_REF_FIELD_MAP (Section 7.2)
+- `related_to` — uses RELATED_TO_FIELD_MAP (Section 14.2)
+
+Other array-of-maps fields — specifically `provenance_chain`, `context`, and `history` — are **NOT** compacted recursively. Their inner maps retain their full key names.
+
+This distinction exists because content refs, embedding refs, and related-to links are high-frequency fields that appear in large numbers (a grain might reference dozens of external files or embeddings). Compacting their keys provides meaningful size savings. Provenance chains and history entries are typically small and infrequent, making compaction less beneficial and the complexity not worth the trade-off.
+
+## Rule 8: Datetime Conversion (Section 4.8)
+
+All datetime fields — `valid_from`, `valid_to`, `created_at`, `system_valid_from`, `system_valid_to` — are converted to **Unix epoch milliseconds (int64)** before serialization:
+
+```
+epoch_ms = floor(datetime.timestamp() * 1000)
+```
+
+The `floor()` function ensures deterministic rounding. Without it, floating-point arithmetic on fractional seconds could produce different results across platforms.
+
+Concrete example from the spec:
+
+```
+2026-01-15T10:00:00.000Z → 1768471200000
+```
+
+This conversion happens in Step 4 of the serialization algorithm, after field compaction but before string normalization and null omission.
+
+## Rule 9: The Full 10-Step Serialization Algorithm (Section 4.9)
+
+The spec defines a precise 10-step algorithm for producing canonical bytes from a grain's logical representation:
+
+1. **Validate required fields** per memory type schema. Reject if any required field is missing.
+
+2. **Compact field names** via the FIELD_MAP (Section 6). Replace `"type"` with `"t"`, `"subject"` with `"s"`, `"confidence"` with `"c"`, and so on for all known fields.
+
+3. **Compact nested maps** in `content_refs`, `embedding_refs`, and `related_to` only. Apply the appropriate nested field map to each entry.
+
+4. **Convert datetimes** to epoch milliseconds using `floor(datetime.timestamp() * 1000)`.
+
+5. **NFC-normalize all strings** recursively. Every string key and value in the entire structure gets normalized.
+
+6. **Omit null/None values** recursively. Walk the entire structure and remove any map entry whose value is null.
+
+7. **Sort map keys** lexicographically by UTF-8 bytes, recursively for all nested maps.
+
+8. **Encode as MessagePack** (or CBOR) using the canonical rules: smallest integer representation, float64 only, no NaN/Infinity.
+
+9. **Prepend the 9-byte header.** Build the fixed header:
+   ```
+   [0x01, flags, type, ns_hash_hi, ns_hash_lo,
+    created_at_sec_b3, created_at_sec_b2, created_at_sec_b1, created_at_sec_b0]
+   ```
+   Where `ns_hash_hi:ns_hash_lo` are the first two bytes of `SHA-256(namespace)` as uint16 big-endian, and the four `created_at_sec` bytes are `uint32` epoch seconds in big-endian order.
+
+10. **Compute SHA-256** over the complete blob bytes (header + payload). The resulting 64-character lowercase hex string is the grain's content address.
+
+<Callout type="info">
+The order of these steps matters. Field compaction (Step 2) must happen before key sorting (Step 7) because the sorted order of compacted keys (`"c"`, `"ca"`, `"s"`) differs from the sorted order of full names (`"confidence"`, `"created_at"`, `"subject"`). If you sort first and compact second, you get the wrong key order.
+</Callout>
+
+Note that the header bytes are included in the hash. This means the content address binds the grain's content to its type, flags, namespace, and creation timestamp. Two grains with identical payloads but different creation times produce different content addresses.
+
+## Rule 10: Nesting Depth Limits (Section 4.10)
+
+To prevent stack overflow attacks from adversarially deep nesting, implementations SHOULD enforce maximum nesting depth limits based on their conformance profile:
+
+| Profile | Maximum Nesting Depth |
+|---------|----------------------|
+| Extended | 32 levels |
+| Standard | 16 levels |
+| Lightweight | 8 levels |
+
+Parsers MAY reject payloads exceeding their profile limit with `ERR_CORRUPT`.
+
+The Lightweight limit of 8 levels is designed for constrained devices (microcontrollers, IoT sensors) where stack space is limited. The Extended limit of 32 levels accommodates complex nested structures while still providing a safety bound.
+
+## Putting It All Together
+
+Consider a simple Fact grain stating "Alice works at ACME Corp" with confidence 0.95, created on January 15, 2026. Here is what the serialization algorithm does:
+
+**Step 1 — Validate:** All required Fact fields present (`type`, `subject`, `relation`, `object`, `confidence`, `source_type`, `created_at`). Pass.
+
+**Step 2 — Compact field names:**
+```json
+{"t":"fact","s":"Alice","r":"works_at","o":"ACME Corp","c":0.95,"st":"user_explicit","ca":1768471200000}
+```
+
+**Step 3 — Compact nested maps:** No `content_refs`, `embedding_refs`, or `related_to`. Skip.
+
+**Step 4 — Convert datetimes:** `created_at` is already epoch milliseconds. No conversion needed.
+
+**Step 5 — NFC-normalize strings:** All strings are already in NFC form. No changes.
+
+**Step 6 — Omit nulls:** No null values present. No changes.
+
+**Step 7 — Sort keys:**
+```json
+{"c":0.95,"ca":1768471200000,"o":"ACME Corp","r":"works_at","s":"Alice","st":"user_explicit","t":"fact"}
+```
+
+**Step 8 — Encode as MessagePack:** The sorted map is encoded using canonical MessagePack rules — `0.95` as float64 (8 bytes), `1768471200000` as the smallest int representation, strings as UTF-8 fixstr or str8.
+
+**Step 9 — Prepend header:** Build the 9-byte header with version `0x01`, appropriate flags, type `0x01` (Fact), namespace hash bytes, and `created_at` as uint32 epoch seconds.
+
+**Step 10 — SHA-256:** Hash the complete blob. The resulting hex string is the content address.
+
+Any compliant implementation — Python, Rust, Go, JavaScript, C — following these same 10 steps with the same input will produce the exact same bytes and the exact same content address.
+
+## Common Implementation Pitfalls
+
+Based on the rules above, here are the most common ways implementations can diverge:
+
+1. **Relying on language-default key ordering.** Python 3.7+ dicts preserve insertion order. That is not lexicographic order. You must re-sort.
+
+2. **Using float32 for small floats.** Some MessagePack libraries default to float32 when the value fits. OMS requires float64 always.
+
+3. **Forgetting NFC normalization.** Most strings in practice are already NFC, so tests may pass without normalization — until someone enters a combining character.
+
+4. **Auto-inserting defaults on round-trip.** If your deserializer fills in `confidence: 0.0` for an absent field, and your serializer writes it back, the hash changes.
+
+5. **Not compacting nested maps.** Compacting top-level keys but forgetting to compact keys inside `content_refs` entries produces different bytes.
+
+6. **Sorting arrays.** Map keys are sorted. Arrays are not. Sorting a `provenance_chain` array destroys the derivation order and changes the hash.
+
+## Conclusion
+
+Deterministic serialization is not glamorous. It is a set of fussy, precise rules about byte ordering, unicode normalization, and integer encoding. But it is what makes content addressing possible, and content addressing is what makes OMS grains portable, verifiable, and interoperable.
+
+Every rule in Section 4 exists because without it, two implementations could reasonably produce different bytes for the same logical content. Key ordering eliminates map ambiguity. Integer encoding eliminates size ambiguity. Float64-only eliminates precision ambiguity. NFC normalization eliminates Unicode ambiguity. Null omission eliminates presence ambiguity. Together, they guarantee that a grain's content address is a stable, universal identity — the same in every language, on every platform, for all time.

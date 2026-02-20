@@ -1,0 +1,180 @@
+---
+title: "Device Profiles: Running OMS from Cloud Servers to Microcontrollers"
+description: "How the Open Memory Specification's three device profiles — Extended, Standard, and Lightweight — adapt the .mg format for everything from cloud servers with gigabytes of RAM to battery-powered microcontrollers with kilobytes."
+date: "2026-02-19"
+readTime: "13 min read"
+tags: ["device-profiles", "iot", "edge-computing", "microcontrollers", "technical"]
+---
+
+The Open Memory Specification is designed to run everywhere — cloud servers with terabytes of storage, Raspberry Pi boards in factory floors, and ESP32 microcontrollers on battery-powered environmental sensors. A grain created by any of these devices must be readable by all of them.
+
+A cloud server can afford a 1 MB grain with a full provenance chain, cross-links, embedding references, and rich metadata. A microcontroller with 512 KB of RAM cannot even hold that grain in memory. Section 18 of the OMS v1.0 specification solves this with three device profiles — constraints on blob size, supported fields, encryption capabilities, and nesting depth. The profiles are not separate formats. A Lightweight grain is a valid Extended grain. The difference is what each device can produce and consume.
+
+## Why Device Profiles Exist
+
+Without profiles, the spec would either be too demanding for microcontrollers or too restrictive for cloud servers. Profiles define three tiers of capability. An implementation declares its target profile, and the spec defines what it must support, what it may omit, and what limits to enforce. The key property: profiles are subsets, not variants. They share the same wire format, header layout, content addressing, and canonical serialization rules. Only size limits, supported fields, and optional features differ.
+
+## Extended Profile: The Default (Section 18.1)
+
+**Target devices:** Servers, desktops, edge gateways
+
+The Extended profile is the default. If an implementation does not declare a profile, it is assumed to be Extended. This profile imposes the fewest restrictions:
+
+- **Max blob size: 1 MB.** This accommodates richly annotated grains with full provenance chains, multiple content references, embedding references, cross-links, and extensive contextual metadata.
+- **Hash function: SHA-256 (REQUIRED).** No alternatives. SHA-256 is the only hash function in OMS v1.0.
+- **All fields supported.** Every field defined in Sections 6 through 8 of the spec is available.
+- **Encryption: AES-256-GCM.** Per-grain encryption with authenticated encryption, including per-user key derivation via HKDF-SHA256.
+- **Full feature set.** COSE signing, selective disclosure, bi-temporal modeling, cross-links, content references, embedding references — everything the spec defines.
+- **Max nesting depth: 32 levels.** The deepest nesting allowed by any profile. This is more than sufficient for any practical grain structure.
+
+The Extended profile is for systems with abundant resources. Cloud-based memory stores, desktop applications, edge gateways with 1 GB or more of RAM — these all target the Extended profile. There is no reason to target a lower profile unless your hardware or environment demands it.
+
+## Standard Profile: The Middle Ground (Section 18.2)
+
+**Target devices:** Single-board computers, mobile devices, IoT gateways
+
+The Standard profile reduces blob size limits while retaining full field support:
+
+- **Max blob size: 32 KB.** Sufficient for most grains — even well-annotated ones — but prevents pathologically large blobs from overwhelming devices with limited memory.
+- **Hash function: SHA-256.** Same as Extended.
+- **All fields supported.** Same as Extended. A Standard-profile grain can use every field in the spec.
+- **Encryption: AES-256-GCM.** Same as Extended.
+- **Vector search: optional.** Standard-profile implementations are not required to support embedding-based vector similarity search. They must still support `embedding_refs` as a field (it is part of "all fields supported"), but they need not implement the vector index that makes similarity queries efficient.
+- **Max nesting depth: 16 levels.** Half the Extended limit. Sufficient for all practical use cases while providing tighter stack safety on devices with limited memory.
+
+The Standard profile fits devices like the Raspberry Pi, NVIDIA Jetson Nano, smartphones, and industrial single-board computers. These devices have enough RAM to process any grain that fits in 32 KB, enough CPU for SHA-256 and AES-256-GCM, and enough storage for a meaningful grain collection. They may not have the resources for a full vector similarity index, which is why vector search is optional.
+
+## Lightweight Profile: The Constraint Frontier (Section 18.3)
+
+**Target devices:** Microcontrollers, battery-powered sensors
+
+The Lightweight profile is where the most aggressive trade-offs happen:
+
+- **Max blob size: 512 bytes.** This is not a typo. Five hundred twelve bytes. A Lightweight grain must fit in half a kilobyte.
+- **Hash function: SHA-256 (hardware accelerator recommended).** SHA-256 is still required — there is no weaker alternative. But on microcontrollers, a hardware SHA-256 accelerator (available on ESP32, STM32, Nordic nRF series, and most modern MCUs) is strongly recommended. Software SHA-256 on a low-clock-rate MCU is slow and power-hungry.
+- **Required fields ONLY.** This is the critical constraint. A Lightweight grain supports only: `type`, `subject`, `relation`, `object`, `confidence`, `created_at`, and `namespace`. All other fields are omitted.
+- **Omitted fields:** `context`, `derived_from`, `provenance_chain`, `content_refs`, `embedding_refs`. These fields are simply not available in the Lightweight profile. A Lightweight implementation does not need to parse them, serialize them, or even know they exist.
+- **Encryption: Transport-level only (DTLS/TLS).** No per-grain encryption. The grain bytes are cleartext. Security is handled at the transport layer — DTLS for UDP-based protocols like CoAP, TLS for TCP-based protocols. This avoids the RAM and power cost of per-grain AES-256-GCM encryption on constrained devices.
+- **Streaming deserialization recommended.** Instead of loading the entire blob into memory and then parsing it, Lightweight implementations should parse the MessagePack stream incrementally, extracting fields as they are encountered. This keeps peak memory usage well below the blob size.
+- **Max nesting depth: 8 levels.** The tightest limit. Microcontrollers have small stacks (often 4-8 KB), and deeply recursive parsing can overflow them. Eight levels is more than enough for a flat grain with no nested structures.
+
+<Callout type="info">
+The Lightweight profile's 512-byte limit is not arbitrary. The Vector 1 test grain — a minimal Fact with 9 fields including an `author_did` of 56 characters — is 159 bytes. A Fact with just the required Lightweight fields (type, subject, relation, object, confidence, created_at, namespace) would be roughly 80-100 bytes, depending on string lengths. 512 bytes provides meaningful headroom for longer strings while remaining feasible for microcontrollers with 256 KB or less of total RAM.
+</Callout>
+
+## What Fits in Each Profile
+
+To understand the practical implications of blob size limits, consider several grain scenarios:
+
+**Minimal Fact (required fields only):**
+A grain like `"user prefers dark mode"` with type, subject, relation, object, confidence, source_type, created_at, and namespace. This produces roughly 100-160 bytes, depending on string lengths. The Vector 1 test grain, which includes an `author_did` (56 characters of DID string), is 159 bytes. Fits in all three profiles.
+
+**Annotated Fact (common optional fields):**
+Add `author_did`, `importance`, `structural_tags` with 2-3 tags, `valid_from`, and `valid_to`. This pushes the grain to roughly 250-400 bytes. Fits in all three profiles, though it is approaching the Lightweight limit.
+
+**Richly annotated Fact (provenance, cross-links):**
+Add a `provenance_chain` with 2-3 entries, `related_to` with 2 cross-links, `context` with 3-4 key-value pairs, and `content_refs` with an image reference. This can easily reach 800-2000 bytes. Fits in Standard and Extended, but NOT Lightweight.
+
+**Episode with long content:**
+An Episode grain with a `content` field containing a full conversation transcript — say, 10 KB of text. Fits in Standard (32 KB limit) and Extended (1 MB limit), but not Lightweight (512 bytes).
+
+**Observation with content reference:**
+A sensor Observation that references an external point cloud file via `content_refs` — the reference metadata adds roughly 150-200 bytes to the base grain. A compact Observation with one content reference fits in all three profiles. But if the Observation includes `context` with sensor calibration data, it may exceed 512 bytes for Lightweight.
+
+## Practical Device Mapping
+
+Here is how the profiles map to real hardware:
+
+### Extended Profile Devices
+
+- **Cloud servers** (AWS EC2, GCP Compute, Azure VMs): Unlimited RAM and storage. Run Level 3 Production Stores with hexastore indexing, full-text search, and encrypted grain envelopes.
+- **Desktop applications**: 8-64 GB RAM. Can hold entire grain collections in memory for fast querying.
+- **Edge gateways**: Devices like Intel NUC, NVIDIA Jetson AGX, or industrial PCs with 4+ GB RAM. Serve as aggregation points that collect grains from Standard and Lightweight devices, enrich them with provenance chains and cross-links, and forward them to cloud stores.
+
+### Standard Profile Devices
+
+- **Raspberry Pi** (all models with 1+ GB RAM): The canonical single-board computer. 32 KB blob limit is never a practical constraint. Can run a full Level 2 implementation.
+- **NVIDIA Jetson Nano**: 4 GB RAM, GPU-accelerated. Can handle embedding generation and vector search alongside grain processing.
+- **Smartphones** (iOS, Android): Ample resources for Standard profile. Mobile OMS clients can create and verify grains locally.
+- **Industrial single-board computers**: Devices from vendors like Advantech, Kontron, and congatec. Deployed in factory automation, building management, and transportation systems.
+
+### Lightweight Profile Devices
+
+- **ESP32**: 520 KB SRAM, hardware SHA-256, WiFi/BLE. The most popular microcontroller for IoT. Can generate Lightweight Fact and Observation grains, hash them, and transmit via MQTT over TLS.
+- **STM32** (Cortex-M series): 64-1024 KB SRAM depending on variant. Many models have hardware crypto accelerators. Used in industrial sensors, medical devices, and automotive systems.
+- **Nordic nRF52/nRF53**: 256 KB RAM, hardware crypto, BLE. Used in wearables, environmental sensors, and asset trackers. The 512-byte Lightweight limit aligns well with BLE's MTU constraints.
+- **Battery-powered environmental sensors**: Temperature, humidity, air quality, soil moisture. These devices wake periodically, take a reading, create a Lightweight Observation grain, transmit it, and sleep. Every byte of grain size impacts battery life because larger payloads require longer radio-on time.
+
+## Interoperability: Upward Compatibility, Not Downward
+
+The relationship between profiles is strictly hierarchical:
+
+**A Lightweight grain is a valid Standard grain is a valid Extended grain.** It is simply a grain with fewer fields. Any Standard or Extended implementation reads it without modification.
+
+**An Extended grain is NOT necessarily a valid Lightweight grain.** If a grain uses `provenance_chain`, `content_refs`, or `context`, a Lightweight implementation cannot process those fields. But per Section 19.4 (Forward Compatibility), unknown fields are preserved during round-trip with no error. A Lightweight reader encountering `provenance_chain` simply ignores it.
+
+This means:
+
+- A cloud server can read and process every grain any device produces. It sees the full picture.
+- A microcontroller can read grains from other microcontrollers. It sees everything those grains contain.
+- A microcontroller receiving a rich grain from a cloud server sees only the fields it understands. The rest is opaque — preserved in memory if the device does round-trip serialization, but not interpreted.
+
+<Callout type="warning">
+Lightweight devices ignoring unknown fields is a feature, not a bug. It is the same principle that makes OMS forward-compatible. When future spec versions add new fields, existing Level 1 implementations continue to work because they ignore what they do not understand. Lightweight devices apply this principle across the current field set.
+</Callout>
+
+## Nesting Depth: Protection Against Stack Overflow
+
+Section 4.10 of the spec defines maximum nesting depth limits per profile:
+
+| Profile | Maximum Nesting Depth |
+|---------|----------------------|
+| Extended | 32 levels |
+| Standard | 16 levels |
+| Lightweight | 8 levels |
+
+Nesting depth refers to how deeply maps and arrays can be nested within each other. A flat grain with no nested structures has a nesting depth of 1 (the top-level map). A grain with a `context` map has depth 2. A grain with `provenance_chain` (an array of maps) has depth 3.
+
+The nesting depth limit exists to protect against adversarial payloads. An attacker could craft a grain with thousands of levels of nesting — maps within maps within maps — designed to overflow the parser's stack. Without a depth limit, parsing such a grain crashes the process.
+
+On a cloud server with a deep stack, 32 levels provides ample room for any legitimate grain structure while still catching adversarial input. On a microcontroller with a 4 KB stack, 8 levels is the safe maximum — each nesting level may consume 50-100 bytes of stack for the parser's recursive descent, and 8 levels keeps total stack usage well within budget.
+
+Parsers MAY reject payloads exceeding their profile's depth limit with `ERR_CORRUPT`. This is a SHOULD-level recommendation, not a MUST — but implementations targeting constrained devices should enforce it strictly.
+
+## Designing for Multi-Profile Deployments
+
+In practice, most OMS deployments span multiple profiles. A typical IoT architecture looks like this:
+
+```
+[Lightweight sensors]  -->  [Standard gateway]  -->  [Extended cloud store]
+     ESP32/nRF                 Raspberry Pi             AWS/GCP/Azure
+    512B grains               32KB grains              1MB grains
+    Transport TLS            AES-256-GCM              Full encryption
+    8-level depth            16-level depth            32-level depth
+```
+
+At each tier, grains can be enriched:
+
+1. **Sensor (Lightweight):** Creates a minimal Observation grain: type, observer_id, observer_type, subject ("room-temperature"), object ("22.5C"), confidence (0.99), created_at, namespace.
+
+2. **Gateway (Standard):** Receives the Observation, validates it, and creates a new Fact grain that includes `derived_from` pointing to the Observation's content address, adds `provenance_chain`, `structural_tags` for classification, and `context` with sensor calibration data. The original Observation grain is forwarded as-is.
+
+3. **Cloud (Extended):** Receives both grains, stores them, adds `embedding_refs` for semantic search, generates `related_to` cross-links to other temperature observations, and indexes everything in a hexastore for graph queries.
+
+The key insight is that the Lightweight sensor does not need to know about provenance chains or embedding references. It creates a minimal, valid grain. The richer context is added at tiers that have the resources to support it. The content-addressed, immutable nature of OMS means the original sensor grain is never modified — it retains its original content address forever. Enrichment happens by creating new grains that reference it.
+
+## Profile Selection Checklist
+
+When choosing a profile, ask these questions:
+
+- **More than 1 MB of RAM available?** Extended profile. Full feature set, largest grains.
+- **32 KB to 1 MB of RAM?** Standard profile. All fields supported, bounded blob size.
+- **Less than 32 KB of RAM?** Lightweight profile. Required fields only, 512-byte limit.
+- **Need per-grain encryption?** Standard or Extended. Lightweight uses transport-level encryption only.
+- **Need provenance chains or cross-links?** Standard or Extended. Lightweight omits these fields.
+- **MCU with hardware SHA-256?** Lightweight with hardware crypto is the sweet spot — content addressing at near-zero CPU cost.
+- **MCU without hardware SHA-256?** Lightweight still works, but software SHA-256 on a slow MCU may take tens of milliseconds per grain.
+
+## Conclusion
+
+Device profiles make OMS practical across the full range of computing hardware. An ESP32 temperature sensor and an AWS cloud instance speak the same language — the sensor just uses a smaller vocabulary. The Extended profile gives you everything. The Standard profile gives you everything with a size guardrail. The Lightweight profile gives you the essential core in a package small enough for a battery-powered sensor to transmit over BLE. Because profiles are subsets of the same format, a grain born on a microcontroller is readable by every device above it in the capability hierarchy.

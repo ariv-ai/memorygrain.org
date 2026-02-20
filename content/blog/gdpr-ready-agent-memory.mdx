@@ -1,0 +1,279 @@
+---
+title: "GDPR-Ready Agent Memory: Per-User Encryption, Crypto-Erasure, and Compliance Mapping"
+description: "How the Open Memory Specification addresses GDPR, CCPA, and HIPAA requirements through per-user encryption with HKDF-SHA256, crypto-erasure via key destruction, blind index lookups, and built-in compliance primitives mapped to specific regulatory articles."
+date: "2026-02-19"
+readTime: "13 min read"
+tags: ["gdpr", "compliance", "privacy", "encryption", "security"]
+---
+
+AI agents accumulate personal data. A customer service agent remembers your name, your email, your order history, your complaint about a defective product. A health assistant tracks your medications, your symptoms, your doctor's recommendations. A productivity agent knows your work patterns, your meeting notes, your preferences for dark mode and morning standup summaries.
+
+Every one of these memories is personal data under the GDPR, personal information under the CCPA, and potentially protected health information under HIPAA. Regulations require that this data can be erased on request, ported to another system, and audited for processing activity. The challenge is not whether to comply --- it is how to build compliance into the memory layer itself, rather than bolting it on as an afterthought.
+
+The Open Memory Specification (OMS) v1.0 addresses this directly. Sections 12.4, 20.3, 20.6, and Appendix C define a compliance architecture built around per-user encryption, crypto-erasure, blind index lookups, and structured metadata that maps to specific regulatory articles. This post walks through each mechanism in detail.
+
+## The Compliance Challenge
+
+The fundamental tension in agent memory is between persistence and erasure. Agents need to remember things to be useful. Regulations require that they forget on demand. Content-addressed immutable grains --- the foundation of OMS --- make this tension especially acute: you cannot modify an immutable blob. You cannot selectively edit bytes out of a SHA-256-hashed container.
+
+The solution is not to make grains mutable. It is to make them unreadable. If every grain containing a user's personal data is encrypted with a key derived from that user's identity, then destroying the key destroys access to all their data. The ciphertext remains, but it is cryptographically indistinguishable from random noise. No key, no data.
+
+This approach --- crypto-erasure --- is the core of OMS's compliance architecture.
+
+## The user_id Field: Compliance Context
+
+Section 12.4 of the specification defines `user_id` as a field specifically for natural persons under GDPR, CCPA, and HIPAA. It is orthogonal to `author_did` (which identifies the agent that created the grain) and `namespace` (which provides logical grouping). The `user_id` field answers a different question: whose personal data does this grain contain?
+
+When `user_id` is present, it triggers a specific set of compliance behaviors:
+
+- **Per-person encryption** --- HKDF key derivation scoped to this user
+- **Erasure proofs** --- crypto-erasure by destroying the user's derived key
+- **Per-person consent tracking** --- consent records linked to this user
+- **Blind index lookups** --- HMAC tokens for querying encrypted data without exposing the plaintext user identity
+
+For non-person memory --- seasonal patterns, device telemetry, system configuration --- `user_id` is simply omitted. The `namespace` field handles logical grouping for these cases. This separation is deliberate: not all agent memory is personal data, and the compliance machinery should only activate when personal data is actually present.
+
+## Per-User Encryption Pattern
+
+Section 20.3 defines a five-step pattern for encrypting grains with per-user keys. This is the mechanism that makes crypto-erasure possible.
+
+### Step 1: Derive Per-User Key via HKDF-SHA256
+
+[HKDF (RFC 5869)](https://datatracker.ietf.org/doc/html/rfc5869) is an HMAC-based key derivation function that takes input keying material and produces cryptographically strong output keys. OMS uses HKDF-SHA256 with the master key as input and the `user_id` as the info parameter:
+
+```python
+import hashlib, hmac
+
+def hkdf_sha256(master_key: bytes, user_id: str, length: int = 32) -> bytes:
+    # Extract phase: derive PRK from master key
+    prk = hmac.new(b"oms-user-key", master_key, hashlib.sha256).digest()
+    # Expand phase: derive per-user key using user_id as info
+    info = user_id.encode("utf-8")
+    okm = hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
+    return okm[:length]
+
+# Each user gets a unique 256-bit key
+alice_key = hkdf_sha256(master_key, "alice-42")
+bob_key   = hkdf_sha256(master_key, "bob-99")
+```
+
+The critical property: each `user_id` produces a different key. Alice's grains are encrypted with Alice's key. Bob's grains are encrypted with Bob's key. The master key never touches the data directly.
+
+### Step 2: Encrypt Grain Bytes with AES-256-GCM
+
+The grain blob (9-byte header + canonical MessagePack payload) is encrypted as an opaque byte sequence using AES-256-GCM --- an authenticated encryption scheme that provides both confidentiality and integrity:
+
+```python
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import os
+
+def encrypt_grain(grain_bytes: bytes, user_key: bytes) -> bytes:
+    nonce = os.urandom(12)  # 96-bit nonce for AES-GCM
+    aesgcm = AESGCM(user_key)
+    ciphertext = aesgcm.encrypt(nonce, grain_bytes, None)
+    return nonce + ciphertext  # Prepend nonce for decryption
+```
+
+<Callout type="info">
+As noted in Section 20.2, the content address of an encrypted grain is the SHA-256 hash of the ciphertext, not the plaintext. Different encryption operations on the same grain (different nonces) produce different content addresses. Systems needing deduplication of encrypted data should store the plaintext content address as separate metadata before encryption.
+</Callout>
+
+### Step 3: Generate HMAC Token (Blind Index)
+
+A blind index allows querying encrypted data without decrypting it. The system generates an HMAC of the `user_id` using a dedicated indexing key, producing a token that can be stored and searched without revealing the plaintext identity:
+
+```python
+def generate_blind_index(user_id: str, index_key: bytes) -> str:
+    token = hmac.new(index_key, user_id.encode("utf-8"), hashlib.sha256).hexdigest()
+    return token
+
+# Token is deterministic: same user_id always produces same token
+alice_token = generate_blind_index("alice-42", index_key)
+```
+
+### Step 4: Store Encrypted Blob with Blind Index
+
+The storage record pairs the encrypted grain with its blind index token:
+
+```json
+{
+  "content_address": "a7f3...",
+  "encrypted_blob": "<base64-encoded ciphertext>",
+  "user_id_token": "hmac(index_key, 'alice-42')"
+}
+```
+
+The `user_id_token` is an HMAC --- not the plaintext `user_id`. Even if the storage layer is compromised, the attacker sees only opaque tokens and encrypted blobs.
+
+### Step 5: Query via Blind Index, Then Decrypt
+
+To retrieve a user's grains, compute their blind index token and look up matching records:
+
+```python
+def query_user_grains(user_id: str, index_key: bytes, user_key: bytes, store):
+    # Step 1: Compute blind index
+    token = generate_blind_index(user_id, index_key)
+    # Step 2: Look up by token (no decryption needed)
+    encrypted_records = store.find_by_token(token)
+    # Step 3: Decrypt matching grains
+    grains = []
+    for record in encrypted_records:
+        plaintext = decrypt_grain(record["encrypted_blob"], user_key)
+        grains.append(plaintext)
+    return grains
+```
+
+The query path never exposes the plaintext `user_id` to the storage layer. The blind index provides an efficient lookup without compromising privacy.
+
+## Crypto-Erasure: O(1) GDPR Compliance
+
+The payoff of the per-user encryption pattern is crypto-erasure. When a user exercises their right to erasure under GDPR Article 17, the system does not need to locate and delete every grain containing their data. It destroys the user's derived key:
+
+```python
+def erase_user(user_id: str, key_store):
+    # Destroy the user's encryption key
+    key_store.delete_key(user_id)
+    # All ciphertext encrypted with this key is now unrecoverable
+    # Optionally: delete blind index tokens for cleanup
+    key_store.delete_blind_index(user_id)
+```
+
+This is O(1) erasure --- constant time regardless of how many grains the user has. Whether the agent stored 10 grains or 10 million grains for this user, key destruction takes the same amount of time. The ciphertext may remain in storage (useful for systems where deletion from distributed backups is impractical), but it is cryptographically unrecoverable without the key.
+
+<Callout type="security">
+Crypto-erasure depends on the strength of the encryption. OMS specifies AES-256-GCM, which provides 256-bit key security. The ciphertext is indistinguishable from random data without the key. However, systems should still perform periodic cleanup of orphaned ciphertext to reduce storage costs and minimize the surface area for future cryptanalytic advances.
+</Callout>
+
+[GDPR Article 17](https://gdpr-info.eu/art-17-gdpr/) requires erasure "without undue delay." The regulation allows up to one month for complex cases. Crypto-erasure via key destruction is effectively instantaneous --- the data becomes unrecoverable the moment the key is deleted.
+
+## GDPR Compliance Mapping
+
+Appendix C of the specification provides a complete mapping between GDPR articles and OMS features. Here is the full table:
+
+| GDPR Article | Requirement | OMS Support |
+|---|---|---|
+| Art. 5 (Data minimization) | Process only what is necessary | `user_id` field enables per-person scope; grains contain only the fields relevant to their memory type |
+| Art. 12-23 (Data subject rights) | Right of access, rectification, portability | Structured data format (.mg container) enables automated response to data subject requests |
+| Art. 17 (Right to erasure) | Delete personal data on request | Crypto-erasure via per-user key destruction; all ciphertext becomes unrecoverable |
+| Art. 25 (Privacy by design) | Build privacy into the system architecture | Provenance tracking and audit trails are built into every grain via `provenance_chain` and `created_at` |
+| Art. 30 (Records of processing) | Maintain records of processing activities | `provenance_chain` records derivation history; `created_at` timestamps track when processing occurred |
+| Art. 32 (Security of processing) | Implement appropriate technical measures | COSE Sign1 signing for authenticity; AES-256-GCM encryption for confidentiality |
+
+[Article 25](https://gdpr-info.eu/art-25-gdpr/) is particularly relevant. It requires data protection "by design and by default" --- meaning privacy measures must be integrated into the system from the ground up, not added after the fact. OMS meets this requirement by baking provenance, audit trails, user identity scoping, and encryption support directly into the grain format. Every grain carries its own processing history.
+
+[Article 32](https://gdpr-info.eu/art-32-gdpr/) requires "appropriate technical and organisational measures" for security, including "the pseudonymisation and encryption of personal data." The per-user encryption pattern with blind indexes directly addresses this: personal data is encrypted at rest, identities are pseudonymized via HMAC tokens, and the encryption uses a standard authenticated scheme (AES-256-GCM).
+
+## CCPA Compliance Mapping
+
+The California Consumer Privacy Act (CCPA) defines different rights and terminology, but OMS maps to its requirements as well. From Appendix C:
+
+| CCPA Requirement | OMS Support |
+|---|---|
+| Personal information collection | `user_id` identifies the data subject; `structural_tags` classify what type of personal information is present |
+| Disclosure | Selective disclosure (Section 10) allows sharing specific grain fields while hiding others |
+| Deletion | Crypto-erasure via per-user key destruction --- same mechanism as GDPR erasure |
+| Opt-out | Policy-layer enforcement (outside the .mg format); OMS provides the structured data that policy engines act on |
+
+The [CCPA's deletion right](https://oag.ca.gov/privacy/ccpa) requires businesses to delete personal information upon a verifiable consumer request, with response required within 15 business days. Like GDPR erasure, crypto-erasure satisfies this requirement instantly at the cryptographic layer.
+
+## HIPAA Compliance Mapping
+
+For systems handling protected health information (PHI), Appendix C maps OMS features to HIPAA's Security Rule under 45 CFR:
+
+| HIPAA Section | Requirement | OMS Support |
+|---|---|---|
+| [Section 164.308](https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164/subpart-C/section-164.308) (Administrative safeguards) | Audit trail, security management | `provenance_chain` provides a complete derivation trail for every grain; `created_at` timestamps enable audit reconstruction |
+| Section 164.310 (Physical safeguards) | Physical security | N/A --- transport and physical storage are outside the .mg format scope |
+| [Section 164.312](https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164/subpart-C/section-164.312) (Technical safeguards) | Encryption, access control, integrity | AES-256-GCM encryption; COSE Sign1 signatures for integrity verification |
+| Section 164.314 (Organizational requirements) | Business associate agreements | N/A --- policy engine responsibility |
+
+The combination of the `phi:` sensitivity tag prefix (Section 13.2) with the per-user encryption pattern creates a practical workflow for HIPAA compliance: grains containing PHI are tagged at creation time (e.g., `phi:diagnosis`, `phi:medication`), the header sensitivity bits are set to `11` (PHI), and the grain is encrypted with the patient's derived key. The header bits enable O(1) routing to HIPAA-compliant storage without deserializing the payload.
+
+## Constant-Time Hash Comparison
+
+Section 20.4 addresses a subtle but critical security requirement: when comparing content addresses for integrity verification, the comparison must be constant-time.
+
+A naive byte-by-byte comparison returns early on the first mismatch. An attacker who can measure response times with sufficient precision can determine how many bytes of a hash match, then iterate to discover the full value. This timing side-channel is well-documented in cryptographic literature.
+
+The spec mandates constant-time comparison using platform-specific cryptographic functions:
+
+**Python:**
+```python
+import hmac
+hmac.compare_digest(expected_hash, computed_hash)
+```
+
+**Go:**
+```go
+import "crypto/subtle"
+result := subtle.ConstantTimeCompare([]byte(expected), []byte(computed))
+```
+
+**JavaScript:**
+```javascript
+import crypto from "crypto";
+crypto.timingSafeEqual(
+  Buffer.from(expected, "hex"),
+  Buffer.from(computed, "hex")
+);
+```
+
+These functions examine all bytes regardless of where the first mismatch occurs. The execution time depends only on the input length, not on the content. This prevents timing attacks against content-address verification --- particularly important in systems where an attacker might probe for the existence of specific grains by submitting candidate hashes.
+
+## Practical Example: Customer Service Agent
+
+Consider a customer service agent that stores user preferences. When a user named Alice interacts with the agent, the system creates a Fact grain:
+
+```json
+{
+  "type": "fact",
+  "subject": "alice-42",
+  "relation": "prefers",
+  "object": "email notifications for order updates",
+  "confidence": 0.95,
+  "source_type": "user_explicit",
+  "created_at": 1739980800000,
+  "namespace": "customer-service",
+  "user_id": "alice-42",
+  "author_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+  "structural_tags": ["pii:name", "preference"]
+}
+```
+
+The compliance workflow proceeds as follows:
+
+1. **At write time:** The serializer sees `user_id: "alice-42"` and `structural_tags` containing `pii:name`. It sets the header sensitivity bits to `10` (PII). The grain is serialized to canonical MessagePack with the 9-byte header prepended.
+
+2. **At encryption time:** The system derives Alice's per-user key via HKDF-SHA256 from the master key and `"alice-42"`. It encrypts the grain blob with AES-256-GCM using Alice's key. It generates a blind index token (`hmac(index_key, "alice-42")`) and stores the encrypted blob alongside the token.
+
+3. **At query time:** When Alice logs in and requests her preferences, the system computes her blind index token, looks up matching encrypted records, derives her decryption key, and decrypts the grains. Alice's plaintext `user_id` never touches the storage layer.
+
+4. **At erasure time:** When Alice exercises her GDPR Article 17 right, the system destroys her HKDF-derived key. All grains encrypted with that key --- preferences, interaction history, support tickets --- become unrecoverable. The operation is O(1) regardless of how many grains Alice accumulated over years of interaction.
+
+5. **At audit time:** The `provenance_chain` on each grain records its derivation history. The `created_at` timestamp records when it was created. Together, these fields satisfy Article 30's requirement for records of processing activities.
+
+## What OMS Does Not Do
+
+It is important to be clear about boundaries. OMS provides the data format and compliance primitives. It does not provide:
+
+- **Policy engines** --- The rules for when encryption is required, which storage tier to use, or how to handle consent are outside the .mg format
+- **Storage layer implementation** --- How and where encrypted blobs are stored is an infrastructure decision
+- **Legal determination** --- Whether a specific piece of data constitutes "personal data" under GDPR or "personal information" under CCPA is a legal question, not a format question (see Section 13.5)
+- **Transport security** --- TLS, mTLS, and network-level encryption are separate concerns
+
+OMS provides the building blocks: structured fields for identity and sensitivity, a per-user encryption pattern, blind indexes for privacy-preserving queries, provenance chains for audit trails, and content addressing for integrity verification. The compliance system is built by combining these primitives with application-specific policy logic.
+
+## Summary
+
+The compliance architecture in OMS v1.0 is built on a clear principle: make personal data erasable by making it encrypted, and make it encrypted by tying encryption keys to user identity. The five-step per-user encryption pattern from Section 20.3 turns GDPR's right to erasure from an engineering nightmare into a key management operation.
+
+| Concern | OMS Mechanism |
+|---|---|
+| Who owns the data? | `user_id` field (Section 12.4) |
+| How is it encrypted? | HKDF-SHA256 + AES-256-GCM (Section 20.3) |
+| How do you query it? | Blind index via HMAC tokens (Section 20.3, step 3) |
+| How do you erase it? | Destroy per-user key --- O(1) crypto-erasure (Section 20.3) |
+| How do you audit it? | `provenance_chain` + `created_at` (Section 14.1) |
+| How do you route it? | Header sensitivity bits + `structural_tags` (Section 13) |
+
+For the sensitivity classification system that powers the routing side of this architecture --- including header-level sensitivity bits, the standard tag vocabulary, and consistency validation --- see [Sensitivity Classification: Routing PII and PHI at the Header Level](/blog/sensitivity-classification).

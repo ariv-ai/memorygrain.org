@@ -1,0 +1,400 @@
+---
+title: "Multi-Modal Memory: How OMS References Images, Audio, Video, and Embeddings"
+description: "A complete guide to Section 7 of the Open Memory Specification — content references, embedding references, modality-specific metadata, and the security model for linking grains to external multi-modal content without embedding blobs."
+date: "2026-02-19"
+readTime: "13 min read"
+tags: ["multi-modal", "content-references", "embeddings", "media"]
+---
+
+AI agents do not operate in a text-only world. A medical diagnostic agent reviews X-ray images. A robotics system processes LiDAR point clouds. A meeting assistant works with audio recordings. A research agent indexes PDF documents. All of these agents need memory — and that memory must reference the multi-modal content they work with.
+
+The Open Memory Specification handles this through a foundational design principle stated in Section 1.2:
+
+> **References, not blobs** — Multi-modal content (images, audio, video, embeddings) is referenced by URI, never embedded in grains.
+
+This is not a soft guideline. It is a hard architectural boundary. A memory grain is a compact, content-addressed binary blob — typically kilobytes in size. An X-ray image is megabytes. A video recording is gigabytes. Embedding these directly in grains would make them unwieldy, slow to hash, expensive to transmit, and impossible to deduplicate effectively.
+
+Instead, OMS defines two reference schemas: **content references** for media files, and **embedding references** for vector embeddings. The grain points to the content. The content lives elsewhere — in a content-addressed store, an object storage bucket, a vector database, or any URI-addressable location.
+
+## Content Reference Schema (Section 7.1)
+
+A content reference describes an external piece of multi-modal content linked to a grain. The spec defines the schema with this JSON example:
+
+```json
+{
+  "uri": "cas://sha256:abc123...",
+  "modality": "image",
+  "mime_type": "image/jpeg",
+  "size_bytes": 1048576,
+  "checksum": "sha256:abc123...",
+  "metadata": {"width": 1920, "height": 1080}
+}
+```
+
+Each field:
+
+| Full Name | Short Key | Type | Required | Description |
+|-----------|-----------|------|----------|-------------|
+| `uri` | `u` | string | REQUIRED | Content URI — the location of the referenced content |
+| `modality` | `m` | string | REQUIRED | Content type: `image`, `audio`, `video`, `point_cloud`, `3d_mesh`, `document`, `binary`, `embedding` |
+| `mime_type` | `mt` | string | RECOMMENDED | Standard MIME type (e.g., `image/jpeg`, `audio/wav`) |
+| `size_bytes` | `sz` | int | OPTIONAL | File size in bytes |
+| `checksum` | `ck` | string | RECOMMENDED | SHA-256 hash for integrity verification (format: `"sha256:abc123..."`) |
+| `metadata` | `md` | map | OPTIONAL | Modality-specific metadata |
+
+The `uri` and `modality` fields are the minimum required to create a valid content reference. But the spec RECOMMENDS including `mime_type` (for content negotiation) and `checksum` (for integrity verification). More on why checksum matters in the security section below.
+
+The short keys (`u`, `m`, `mt`, `sz`, `ck`, `md`) are part of the nested field compaction defined in Section 7.1. When a grain is serialized, the content reference entries inside the `content_refs` array have their keys compacted along with the top-level field name (`content_refs` becomes `cr`).
+
+### Eight Modalities
+
+The `modality` field uses a closed vocabulary of eight values:
+
+| Modality | Use Case |
+|----------|----------|
+| `image` | Photographs, X-rays, screenshots, diagrams |
+| `audio` | Voice recordings, sound samples, music |
+| `video` | Video recordings, screen captures, surveillance |
+| `point_cloud` | LiDAR scans, depth sensor output, 3D reconstructions |
+| `3d_mesh` | CAD models, 3D-printed object files, game assets |
+| `document` | PDFs, spreadsheets, text files, presentations |
+| `binary` | Any other binary format not covered above |
+| `embedding` | Vector embedding stored as a file (distinct from embedding_refs) |
+
+The distinction between `embedding` as a modality in `content_refs` and the separate `embedding_refs` schema is worth noting. A content reference with `modality: "embedding"` points to an embedding stored as a file (e.g., a NumPy array on disk). An embedding reference (Section 7.2) points to an embedding in a vector database with metadata about the model and dimensions. They serve different access patterns.
+
+## Embedding Reference Schema (Section 7.2)
+
+Embedding references link grains to vector embeddings stored in external vector databases. These enable semantic similarity search — "find grains with similar meaning" — which is fundamental to how AI agents retrieve relevant memories.
+
+The spec defines the schema:
+
+```json
+{
+  "vector_id": "vec-12345",
+  "model": "text-embedding-3-large",
+  "dimensions": 3072,
+  "modality_source": "text",
+  "distance_metric": "cosine"
+}
+```
+
+Each field:
+
+| Full Name | Short Key | Type | Required | Description |
+|-----------|-----------|------|----------|-------------|
+| `vector_id` | `vi` | string | REQUIRED | ID in the vector store |
+| `model` | `mo` | string | REQUIRED | Embedding model name (e.g., `"text-embedding-3-large"`) |
+| `dimensions` | `dm` | int | REQUIRED | Vector dimensionality (e.g., `3072`) |
+| `modality_source` | `ms` | string | OPTIONAL | Source modality: `"text"`, `"image"`, `"audio"`, etc. |
+| `distance_metric` | `di` | string | OPTIONAL | `"cosine"`, `"l2"`, or `"dot"` |
+
+Three fields are required: `vector_id` (to look up the vector), `model` (to know which embedding model produced it), and `dimensions` (to validate vector compatibility). The optional fields provide search context — `distance_metric` tells the query engine which similarity function to use, and `modality_source` indicates what type of content was embedded.
+
+<Callout type="info">
+The `model` field is important for correctness. Embeddings from different models are not comparable — a `text-embedding-3-large` vector and a `text-embedding-ada-002` vector live in different semantic spaces. Recording the model name ensures that search systems only compare embeddings produced by the same model.
+</Callout>
+
+Like content references, embedding reference entries use nested field compaction: `vector_id` becomes `vi`, `model` becomes `mo`, `dimensions` becomes `dm`, `modality_source` becomes `ms`, and `distance_metric` becomes `di`.
+
+## Modality-Specific Metadata (Section 7.3)
+
+The `metadata` field in a content reference holds modality-specific information. The spec defines standard metadata schemas for four modalities:
+
+### Image Metadata
+
+```json
+{"width": 1920, "height": 1080, "color_space": "sRGB"}
+```
+
+Width and height in pixels, plus the color space. This enables applications to display image references correctly without fetching the actual file — useful for building gallery views or layout calculations.
+
+### Audio Metadata
+
+```json
+{"sample_rate_hz": 48000, "channels": 2, "duration_ms": 15000}
+```
+
+Sample rate in hertz, channel count (1 for mono, 2 for stereo), and duration in milliseconds. A 15-second stereo recording at 48kHz, fully described without downloading the audio file.
+
+### Video Metadata
+
+```json
+{"width": 3840, "height": 2160, "fps": 30, "duration_ms": 120000, "codec": "h264"}
+```
+
+Resolution, frame rate, duration, and codec. This is a 4K video at 30fps, 2 minutes long, H.264 encoded. Enough metadata for a video index to display thumbnails, estimate bandwidth requirements, and filter by resolution — all without touching the video file.
+
+### Point Cloud Metadata
+
+```json
+{"point_count": 1234567, "format": "pcd_binary", "has_color": true}
+```
+
+Number of points, file format, and whether color data is included. For robotics and autonomous systems working with LiDAR data, this metadata enables efficient filtering: "find all point clouds with more than 1 million points that include color data."
+
+<Callout type="info">
+The `metadata` field is typed as a generic map, so applications can add custom metadata keys beyond these standard examples. However, the standard keys should be used when applicable for interoperability.
+</Callout>
+
+## A Complete Multi-Modal Grain Example
+
+Here is what a Fact grain with content references and embedding references looks like before and after compaction. Imagine a medical AI that has diagnosed a pneumonia case from a chest X-ray:
+
+**Before compaction:**
+
+```json
+{
+  "type": "fact",
+  "subject": "patient-0042",
+  "relation": "diagnosed_with",
+  "object": "pneumonia",
+  "confidence": 0.92,
+  "source_type": "agent_inferred",
+  "created_at": 1768471200000,
+  "namespace": "radiology",
+  "content_refs": [
+    {
+      "uri": "cas://sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
+      "modality": "image",
+      "mime_type": "image/dicom",
+      "size_bytes": 8388608,
+      "checksum": "sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
+      "metadata": {"width": 2048, "height": 2048, "color_space": "MONOCHROME2"}
+    }
+  ],
+  "embedding_refs": [
+    {
+      "vector_id": "emb-xray-0042",
+      "model": "medclip-vit-l-14",
+      "dimensions": 768,
+      "modality_source": "image",
+      "distance_metric": "cosine"
+    }
+  ]
+}
+```
+
+**After full compaction (top-level + nested):**
+
+```json
+{
+  "c": 0.92,
+  "ca": 1768471200000,
+  "cr": [
+    {
+      "ck": "sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
+      "m": "image",
+      "md": {"width": 2048, "height": 2048, "color_space": "MONOCHROME2"},
+      "mt": "image/dicom",
+      "sz": 8388608,
+      "u": "cas://sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"
+    }
+  ],
+  "er": [
+    {
+      "di": "cosine",
+      "dm": 768,
+      "mo": "medclip-vit-l-14",
+      "ms": "image",
+      "vi": "emb-xray-0042"
+    }
+  ],
+  "ns": "radiology",
+  "o": "pneumonia",
+  "r": "diagnosed_with",
+  "s": "patient-0042",
+  "st": "agent_inferred",
+  "t": "fact"
+}
+```
+
+Notice that in the compacted form, all map keys (both top-level and nested) are sorted lexicographically — this is the canonical serialization from Section 4.1 applied after compaction.
+
+## Security Considerations (Section 20.5)
+
+URIs in `content_refs` and `embedding_refs` point to external resources. This creates a security surface that the spec addresses in Section 20.5 with three rules:
+
+### 1. Validate URIs
+
+Implementations MUST validate URIs and **reject private IP ranges unless explicitly allowed**. Without this check, a malicious grain could contain a content reference pointing to `http://192.168.1.1/admin` or `http://169.254.169.254/latest/meta-data/` (the AWS metadata endpoint), turning any system that fetches content references into a server-side request forgery (SSRF) vector.
+
+URI validation should reject:
+- Private IPv4 ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+- Loopback addresses (127.0.0.0/8)
+- Link-local addresses (169.254.0.0/16)
+- Cloud metadata endpoints
+
+### 2. Verify Checksums After Fetch
+
+When a content reference includes a `checksum` field (which the spec RECOMMENDS), implementations MUST verify the checksum after fetching the content. This detects tampering — if the content at the URI has been modified since the grain was created, the checksum will not match.
+
+The checksum format is `"sha256:abc123..."` — the same SHA-256 algorithm used for content addressing. Verification is straightforward: fetch the content, compute its SHA-256 hash, compare to the stored checksum.
+
+<Callout type="security">
+Checksum verification is especially important for content stored on mutable infrastructure (HTTP URLs, cloud storage). A content-addressed store (`cas://sha256:...`) is inherently integrity-verified by its URI scheme, but an HTTP URL can serve different content at different times. The checksum field bridges this gap.
+</Callout>
+
+### 3. Never Auto-Fetch During Deserialization
+
+Content references MUST be **fetch-on-demand only**. A deserializer MUST NOT automatically fetch external URIs when parsing a grain. This rule prevents several attack vectors:
+
+- **Resource exhaustion:** A grain with thousands of content references could trigger thousands of HTTP requests.
+- **Information disclosure:** Fetching a URI reveals the deserializer's IP address and network location to the URI owner.
+- **Denial of service:** References to slow or unresponsive endpoints could block deserialization.
+- **Code execution:** Some URI schemes or MIME types could trigger unintended processing.
+
+The application layer decides when and whether to fetch referenced content, after applying its own security policies.
+
+## Use Cases
+
+The multi-modal reference architecture enables a wide range of applications:
+
+### Medical Imaging
+
+A diagnostic AI creates Fact grains linking patients to conditions. Each Fact references the medical images (X-rays, MRIs, CT scans) that informed the diagnosis via `content_refs`. The images themselves live in a PACS (Picture Archiving and Communication System) or content-addressed store.
+
+```json
+{
+  "type": "fact",
+  "subject": "patient-0042",
+  "relation": "shows_finding",
+  "object": "right_lower_lobe_opacity",
+  "confidence": 0.88,
+  "source_type": "agent_inferred",
+  "content_refs": [
+    {
+      "uri": "pacs://study/1.2.840.113619/series/1.3.12/image/1.3.12.2",
+      "modality": "image",
+      "mime_type": "application/dicom",
+      "checksum": "sha256:9f86d081884c7d659a2feaa0c55ad015...",
+      "metadata": {"width": 2048, "height": 2048, "color_space": "MONOCHROME2"}
+    }
+  ]
+}
+```
+
+The grain is kilobytes. The DICOM image is megabytes. They are linked, not merged.
+
+### Voice Recordings and Conversation Episodes
+
+A meeting assistant creates Episode grains for each conversation segment. The raw audio is referenced, not embedded:
+
+```json
+{
+  "type": "episode",
+  "content": "Discussion about Q3 revenue projections. CFO presented updated forecast showing 12% growth.",
+  "created_at": 1768471200000,
+  "content_refs": [
+    {
+      "uri": "s3://meetings-bucket/2026-01-15/segment-003.wav",
+      "modality": "audio",
+      "mime_type": "audio/wav",
+      "size_bytes": 4800000,
+      "checksum": "sha256:e3b0c44298fc1c149afbf4c8996fb924...",
+      "metadata": {"sample_rate_hz": 48000, "channels": 1, "duration_ms": 30000}
+    }
+  ]
+}
+```
+
+The Episode grain contains the text summary. The audio reference allows the original recording to be retrieved for verification.
+
+### LiDAR Point Clouds and Robotics
+
+An autonomous vehicle creates Observation grains for each LiDAR scan. The point cloud data — often millions of points per scan — is referenced:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "lidar-velodyne-top",
+  "observer_type": "lidar",
+  "created_at": 1768471200000,
+  "subject": "intersection-main-and-5th",
+  "object": "pedestrian_detected_crosswalk",
+  "confidence": 0.94,
+  "frame_id": "vehicle_base_link",
+  "content_refs": [
+    {
+      "uri": "cas://sha256:d7a8fbb307d7809469ca9abcb0082e4f...",
+      "modality": "point_cloud",
+      "mime_type": "application/pcd",
+      "size_bytes": 24000000,
+      "checksum": "sha256:d7a8fbb307d7809469ca9abcb0082e4f...",
+      "metadata": {"point_count": 1234567, "format": "pcd_binary", "has_color": true}
+    }
+  ]
+}
+```
+
+The Observation grain records what was detected and when. The point cloud reference provides the raw sensor data for replay, debugging, or reprocessing.
+
+### Document Attachments
+
+A research agent creates Fact grains summarizing findings from papers. The papers are referenced as documents:
+
+```json
+{
+  "type": "fact",
+  "subject": "transformer_architecture",
+  "relation": "introduced_in",
+  "object": "Attention Is All You Need (Vaswani et al., 2017)",
+  "confidence": 1.0,
+  "source_type": "imported",
+  "content_refs": [
+    {
+      "uri": "cas://sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e...",
+      "modality": "document",
+      "mime_type": "application/pdf",
+      "size_bytes": 2100000,
+      "checksum": "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e..."
+    }
+  ]
+}
+```
+
+### Vector Search Integration
+
+The embedding reference schema enables a powerful pattern: grains that are both content-addressed (for exact lookup) and vector-indexed (for semantic search). A Fact grain can have both a deterministic content address and one or more embedding references:
+
+```json
+{
+  "type": "fact",
+  "subject": "Alice",
+  "relation": "expertise_in",
+  "object": "distributed systems and consensus protocols",
+  "confidence": 0.85,
+  "source_type": "consolidated",
+  "embedding_refs": [
+    {
+      "vector_id": "vec-fact-alice-expertise",
+      "model": "text-embedding-3-large",
+      "dimensions": 3072,
+      "modality_source": "text",
+      "distance_metric": "cosine"
+    }
+  ]
+}
+```
+
+When an agent asks "who knows about Raft consensus?", the system can do a cosine similarity search across embedding refs, find this grain, and retrieve it by content address. The embedding reference bridges the semantic search world and the content-addressed storage world.
+
+Multiple embedding references per grain support multi-modal search — a grain could have both a text embedding and an image embedding, enabling retrieval by either textual similarity or visual similarity.
+
+## The Reference Architecture
+
+The OMS multi-modal design creates a clean separation of concerns:
+
+- **Memory layer** (grains): Compact, deterministic, content-addressed. Contains structured knowledge and metadata. Kilobytes.
+- **Content layer** (referenced media): Large, potentially mutable, stored wherever makes sense. Referenced by URI with optional integrity verification. Megabytes to gigabytes.
+- **Embedding layer** (vector store): High-dimensional vectors for semantic search. Referenced by ID with model and dimension metadata. Enables retrieval without deserialization.
+
+This separation means grains remain portable and efficient. You can export a user's complete memory as a `.mg` container file — all grains, all metadata, all provenance chains — without including gigabytes of media files. The content references remain intact, pointing to wherever the media is stored. A new system can resolve those URIs to fetch content on demand.
+
+It also means the same content can be referenced by multiple grains without duplication. Ten Fact grains derived from the same X-ray all point to the same URI. The image is stored once.
+
+## Conclusion
+
+Multi-modal content is central to how AI agents perceive and interact with the world. The OMS approach — references, not blobs — keeps grains compact and deterministic while providing a rich, typed, integrity-verified link to external content of any modality. Content references describe the media. Embedding references enable semantic search. Modality-specific metadata provides enough information for indexing and display without fetching. And the security model ensures that references cannot be exploited for SSRF, resource exhaustion, or tampering.
+
+The result is a memory format that is equally at home referencing a 2KB text snippet and a 2GB video file — because the grain itself never contains either. It just knows where to find them.

@@ -1,0 +1,172 @@
+---
+title: "The Case for an Open Memory Standard"
+description: "Why agent memory locked in proprietary formats is a liability, how the Open Memory Specification's eight requirements and ten design principles solve the portability problem, and what OMS intentionally leaves out of scope."
+date: "2026-02-19"
+readTime: "13 min read"
+tags: ["open-standard", "portability", "vendor-lock-in", "architecture"]
+---
+
+Every time an AI agent learns something --- a user preference, a task outcome, a sensor reading, a tool invocation result --- that knowledge has to go somewhere. Where it goes determines who controls it. If it goes into a proprietary vector database, a platform-specific memory layer, or a custom JSON schema tied to a particular framework, then that knowledge is locked. Locked to a vendor, locked to a platform, locked to an implementation that may not exist in two years.
+
+The Open Memory Specification (OMS) exists to solve this problem. It defines a universal, language-agnostic, self-describing interchange format for agent memory --- one that any system can write and any system can read, regardless of the LLM provider, agent framework, cloud platform, or storage backend behind it.
+
+This post makes the case for why an open standard matters, what specific design choices make OMS portable, and what OMS deliberately does not dictate.
+
+## The vendor lock-in problem
+
+Agent memory is not a commodity. It is accumulated knowledge --- the result of weeks, months, or years of interactions, observations, decisions, and learned procedures. When that knowledge lives in a proprietary format, switching costs are not just technical. They are knowledge costs. You are not migrating a database schema. You are migrating an agent's entire understanding of the world.
+
+Consider what happens when you need to switch:
+
+**LLM providers.** Your agent's memory should not be tied to the model that generated it. If you move from one LLM provider to another --- or from a hosted model to an open-source one --- the facts your agent has learned, the episodes it has recorded, the goals it is tracking do not change. The model is the reasoning engine. The memory is the data. Coupling them means re-learning everything when you switch engines.
+
+**Agent frameworks.** Frameworks evolve, get abandoned, or get replaced by better alternatives. The framework is the engine; memory is the data. A workflow grain recording the steps of an ETL pipeline is valid regardless of whether it was created by one framework or another. Locking memory to a framework means rebuilding your knowledge base every time you change your tooling.
+
+**Cloud platforms.** Organizations migrate between cloud providers. They move workloads on-premises for regulatory reasons. They adopt hybrid architectures. If agent memory is stored in a platform-specific service with a platform-specific format, that memory does not survive the migration without a custom, often lossy, translation layer.
+
+**Memory providers.** The agent memory space is young and evolving. The memory provider you choose today may not be the one you need tomorrow. Switching should mean changing a storage backend, not rebuilding accumulated knowledge from scratch.
+
+In each of these scenarios, the core problem is the same: knowledge that should be portable is trapped in a format that is not.
+
+## The analogy: what JSON did for APIs
+
+The Abstract of the OMS specification frames the solution directly:
+
+> The .mg container format is to autonomous systems what JSON is to APIs and .git objects are to version control: a universal, language-agnostic, self-describing interchange format.
+
+Before JSON became ubiquitous, APIs used XML, SOAP, proprietary binary formats, and platform-specific serialization. Integrating two systems meant understanding each system's custom data format. JSON did not replace databases or application logic. It defined the interchange layer --- the format that systems speak when they talk to each other. Once every system could emit and consume JSON, the integration problem collapsed from O(n^2) pairwise translations to O(n) implementations of a single standard.
+
+OMS aims to do the same for agent memory. The `.mg` container is not a database. It is not a query engine. It is not an agent framework. It is the interchange format --- the common language that agent memory systems speak when they need to export, import, share, or verify knowledge.
+
+## Eight requirements that make portability possible
+
+Section 1.1 of the specification defines eight requirements for persistent agent memory. Each one addresses a specific failure mode that proprietary formats leave unresolved.
+
+### Portable
+
+Grains are transferable between agents, systems, and organizations. A grain produced by one implementation can be read by any other implementation. The content is the same bytes, the hash is the same hash, the fields carry the same semantics. There is no platform-specific preamble, no vendor header, no version negotiation beyond checking byte 0 of the blob.
+
+### Verifiable
+
+Integrity is cryptographically proven via SHA-256. Every grain is identified by the hash of its complete blob bytes. A recipient can recompute the hash and confirm the grain has not been modified, corrupted, or truncated. This is not a checksum bolted onto a proprietary format --- it is the grain's identity.
+
+### Immutable
+
+Once created, a grain is never modified. Its bytes are fixed, its hash is fixed, its content is fixed. When knowledge changes, OMS uses supersession --- a new grain is written with a `derived_from` field pointing to the original's content address. The original grain remains intact, retrievable, and verifiable. This means there is no ambiguity about what a grain contained at any point in time.
+
+### Auditable
+
+Full provenance chain recorded. Every grain can carry a `provenance_chain` field documenting where its knowledge came from --- which source grains contributed, what consolidation method was used, and what weight each source carried. For Goal grains, the supersession chain records every state transition: active to suspended to satisfied, with `state_reason` documenting why each transition occurred.
+
+### Compliant
+
+Designed for regulatory requirements. Every grain can carry a `user_id` for GDPR data subject identification, `namespace` for logical partitioning, sensitivity classification in the header (public, internal, PII, PHI), and `structural_tags` with standardized prefixes (`pii:`, `phi:`, `reg:`, `sec:`, `legal:`). These fields are not afterthoughts --- they are part of the core schema, present from the first grain.
+
+### Interoperable
+
+Works across programming languages and platforms. The serialization format is MessagePack (default) or CBOR (optional), both of which have mature libraries in dozens of languages. The canonical serialization rules --- lexicographic key ordering, NFC-normalized strings, null omission, minimum-size integers, float64-only floating point --- ensure that two implementations in different languages produce byte-identical output for the same input.
+
+### Efficient
+
+Minimal storage with content deduplication. Field compaction maps human-readable names to short keys (e.g., `confidence` becomes `c`, `source_type` becomes `st`). Content addressing enables deduplication --- byte-identical grains produce the same hash and need only be stored once. The 9-byte fixed header packs version, flags, type, namespace hash, and creation timestamp into a minimal prefix.
+
+### Secure
+
+Encryption, signing, and selective disclosure. COSE Sign1 envelopes (RFC 9052) provide cryptographic signatures with W3C DID-based identity. Selective disclosure allows sharing grains with specific fields hidden behind SHA-256 hashes. Per-user encryption via HKDF-SHA256 enables crypto-erasure --- destroying a user's key renders all their grains unrecoverable.
+
+## Ten design principles --- the ones that matter most for portability
+
+Section 1.2 defines ten design principles. Several are directly responsible for the portability that proprietary formats lack.
+
+### References, not blobs (Principle 1)
+
+Multi-modal content --- images, audio, video, embeddings --- is referenced by URI, never embedded in grains. A grain that describes an image observation contains a content reference with the URI, MIME type, checksum, and metadata. The image bytes live elsewhere. This keeps grains compact, hashable, and transferable regardless of the size of referenced content. It also means that two systems can share grains without sharing every large binary artifact --- the references are portable even if the referenced content is stored in different locations.
+
+### Additive evolution (Principle 2)
+
+New fields never break old implementations. Parsers must ignore unknown fields and preserve them during round-trip serialization. This is the single most important principle for long-term portability. It means a grain written by a v1.1 implementation can be read by a v1.0 implementation --- the unknown fields pass through untouched. Your investment in OMS v1.0 is not invalidated by future versions.
+
+### No AI in the format (Principle 6)
+
+The wire format is fully deterministic. There is no probabilistic component, no model inference, no prompt. LLMs produce grains and consume grains, but the format itself is as mechanistic as a TCP header. This is why the same grain serialized in Python and Rust produces identical bytes --- there is no interpretation, only encoding rules. Determinism is what makes interoperability possible.
+
+### Index without deserialize (Principle 7)
+
+The 9-byte fixed header exposes version, flags, memory type, namespace hash, and creation timestamp at fixed byte offsets. A store can filter, route, and sort grains by reading nine bytes, without touching MessagePack at all. The namespace hash in bytes 3-4 provides 65,536 routing buckets. The type byte at offset 2 enables O(1) filtering by memory type. This means indexing and routing work identically across all implementations --- the header format is the same regardless of who produced the grain.
+
+### One file, full memory (Principle 10)
+
+The `.mg` container file is the portable unit for full knowledge export. Section 11 defines the format: a 16-byte header (magic bytes, flags, grain count, field map version, compression codec, reserved bytes), an offset index for random access, all grains in sequence, and a SHA-256 footer checksum over the entire file.
+
+Copy the file, and you have copied the entire memory. The file is self-describing --- the header tells you how many grains it contains, whether they are sorted, whether they are compressed. The index enables random access. The footer verifies integrity. A recipient needs nothing but an OMS parser to read it.
+
+<Callout type="info">
+The .mg file format mirrors familiar paradigms: `.sqlite` is a database file containing many rows; `.git` is a repository containing many objects; `.mg` is a memory file containing many grains. Each is a portable, self-contained unit that can be copied, shared, and verified without the originating system.
+</Callout>
+
+## Open licensing: no barriers to implementation
+
+The OMS specification is published under CC0 1.0 Universal --- public domain dedication --- for copyright, and the Open Web Foundation Final Specification Agreement (OWFa 1.0) for the specification license. This combination means:
+
+- Anyone can implement OMS without royalties, licensing fees, or permission
+- There are no patent encumbrances from the specification authors
+- Commercial implementations are explicitly permitted
+- No attribution is required (though it is appreciated)
+- The specification can be freely redistributed, modified, and built upon
+
+This is not incidental. An interchange format is only useful if everyone can implement it. Licensing restrictions --- even permissive ones with attribution requirements --- create friction that reduces adoption. CC0 + OWFa eliminates that friction entirely.
+
+## Conformance levels lower the adoption barrier
+
+Section 17 defines three conformance levels, and their progressive structure is designed to make adoption incremental rather than all-or-nothing.
+
+**Level 1: Minimal Reader.** Deserialize grains, verify SHA-256 content addresses, support field compaction, recognize all seven memory types, ignore unknown fields. Level 1 is read-only. You can consume OMS grains without producing them. This is the lowest-risk entry point.
+
+**Level 2: Full Implementation.** All Level 1 requirements plus serialization, canonical encoding, schema validation, test vector compliance, the Store protocol (get/put/delete/list/exists), and enforcement of invalidation policies. Level 2 is read-write.
+
+**Level 3: Production Store.** All Level 2 requirements plus encrypted grain envelopes (AES-256-GCM), per-user key derivation (HKDF-SHA256), blind-index tokens for encrypted search, hexastore indexing, full-text search, hash-chained audit trails, crash recovery, and a policy engine.
+
+The progression from Level 1 to Level 3 means you can start by simply verifying that you can read `.mg` grains. No commitment to rewriting your storage layer. No commitment to implementing encryption or audit trails. Just: can you read the format? If yes, you are Level 1 compliant, and you can interoperate with every other OMS implementation at the read level.
+
+## Language-agnostic by design
+
+Section 22.1 lists MessagePack libraries across six languages: Python (`ormsgpack`, `msgpack`), Rust (`rmp-serde`), Go (`msgpack/v5`), JavaScript (`@msgpack/msgpack`), Java (`jackson-dataformat-msgpack`), and C# (`MessagePack-CSharp`). MessagePack itself supports 50+ languages.
+
+The binary format does not care what language your agent is written in. The canonical serialization rules are expressed in terms of byte ordering, encoding sizes, and normalization forms --- not in terms of language-specific types or runtime features. A grain serialized in Python and one serialized in Rust produce identical bytes for the same input. That is the definition of interoperability.
+
+Section 22.2 provides NFC string normalization implementations across Python, Go, JavaScript, and Java. Section 22.3 provides constant-time hash comparison implementations. The spec does not just define the format --- it points you at the libraries you need to implement it.
+
+## The .mg file as universal export
+
+The `.mg` file (Section 11) is the concrete artifact that makes portability real. It is not an abstract concept --- it is a file you can copy, email, upload, or archive.
+
+Any agent can export its memory as a `.mg` file. That file contains every grain the agent has accumulated: facts, episodes, checkpoints, workflows, tool call records, observations, and goals. The 16-byte header describes the collection. The offset index enables random access to any grain without scanning the entire file. The SHA-256 footer checksum verifies the file's integrity.
+
+Any other agent can import that file --- regardless of platform, language, or framework. The importing agent reads the header, verifies the footer checksum, iterates through the grains, verifies each grain's individual content address, and adds them to its own store. The import is lossless because the format is self-describing and the content is canonical.
+
+<Callout type="success">
+The .mg file eliminates the need for custom export/import adapters between platforms. Instead of building pairwise translations between every pair of systems (O(n^2) integrations), each system implements one format (O(n) implementations). This is the same leverage that JSON provided for APIs, that SQL provided for relational databases, and that HTML provided for documents.
+</Callout>
+
+## What OMS does NOT dictate
+
+Section 1.4 is as important as the sections that define the format. It explicitly lists what is out of scope:
+
+- **Storage layer implementation** (filesystem, S3, database, IPFS) --- OMS does not tell you where to store grains
+- **Index layer queries and optimization** --- OMS does not define a query language or require specific index structures
+- **Policy engines and compliance rule evaluation** --- OMS provides the metadata fields; the policy engine is your responsibility
+- **Transport protocols** (HTTP, MQTT, Kafka) --- OMS defines wire framing for streaming but not the transport layer
+- **Encryption at rest** --- per-grain encryption is external to the spec; OMS defines the grain format, not the encryption envelope
+- **Agent-to-agent communication protocol** --- OMS grains are the payload; the communication protocol is separate
+
+This deliberate scoping is a feature, not a limitation. OMS defines the interchange format --- the shape of the data that moves between systems. How you store it, query it, encrypt it, transport it, and enforce policy on it are implementation decisions that belong to your system, not to the spec. This means OMS does not conflict with your existing infrastructure. It slots in as the data format layer, leaving everything above and below it to your discretion.
+
+## The cost of not having a standard
+
+Without a standard interchange format, every agent memory system is an island. Moving knowledge between systems requires custom translation code that is expensive to build, fragile to maintain, and lossy by nature --- every translation drops something, reinterprets something, or adds something that was not in the original.
+
+The cost compounds over time. As your agent accumulates more knowledge, the switching cost grows. As more systems touch that knowledge, the integration cost grows. As regulations tighten, the compliance cost of ad-hoc formats grows. The longer you wait to adopt a portable format, the more knowledge you accumulate in formats that are not portable.
+
+OMS does not require you to abandon your existing storage, your existing framework, or your existing cloud provider. It requires you to agree on what the data looks like when it moves between systems. The 9-byte fixed header, the canonical MessagePack payload, the SHA-256 content address, the seven memory types, the `.mg` container file --- these are the common language. Everything else is your choice.
+
+The specification is published. The license is open. The format is language-agnostic. The conformance levels allow incremental adoption. The question is not whether your agent memory should be portable --- it is when you start making it so.

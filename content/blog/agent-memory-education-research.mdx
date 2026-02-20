@@ -1,0 +1,549 @@
+---
+title: "OMS for Education and Research: Knowledge Graphs, Citations, and Reproducibility"
+description: "How the Open Memory Specification maps to education and research — using Facts as knowledge graph triples, provenance chains as citation trails, Episodes for student interactions, Goals for learning objectives, embedding refs for semantic search, and content addressing for reproducible research."
+date: "2026-02-19"
+readTime: "12 min read"
+tags: ["education", "research", "knowledge-graph", "citations", "industry"]
+---
+
+Educational AI agents face a challenge that sets them apart from most other agent types: they need to build structured knowledge incrementally, track a learner's progress over time, maintain rigorous citation trails back to source materials, and — in research settings — ensure that every conclusion is reproducible from the original data. These are not nice-to-have features. They are fundamental requirements for any system trusted with teaching and scholarship.
+
+The Open Memory Specification addresses each of these requirements through its core memory types and cross-linking mechanisms. This post maps OMS to education and research, showing how Fact grains form knowledge graph triples, provenance chains serve as citation trails, Episodes capture student interactions, Goals track learning objectives, and embedding references enable semantic search across accumulated knowledge.
+
+## Facts as knowledge graph triples
+
+The Fact memory type (Section 8.1) is a structured knowledge claim modeled as a semantic triple: subject-relation-object. This maps directly to the nodes and edges of a knowledge graph.
+
+Consider the complete example grain from Appendix F of the spec:
+
+```json
+{
+  "type": "fact",
+  "subject": "machine-learning",
+  "relation": "is_subset_of",
+  "object": "artificial-intelligence",
+  "confidence": 0.99,
+  "source_type": "user_explicit",
+  "created_at": 1737000000000,
+  "namespace": "knowledge-base",
+  "author_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+  "user_id": "researcher-alice",
+  "importance": 0.95,
+  "structural_tags": ["ai", "ml", "education"],
+  "context": {"source": "textbook", "chapter": "1.2"},
+  "provenance_chain": [
+    {"source_hash": "abc123...", "method": "direct_input", "weight": 1.0}
+  ],
+  "related_to": [
+    {
+      "hash": "def456...",
+      "relation_type": "elaborates",
+      "weight": 0.8
+    }
+  ]
+}
+```
+
+This grain establishes that "machine-learning is_subset_of artificial-intelligence" with 0.99 confidence, sourced explicitly from a user (`source_type: "user_explicit"`). The `context` map carries source attribution: `{"source": "textbook", "chapter": "1.2"}`. The `structural_tags` classify it under `["ai", "ml", "education"]`. The `related_to` cross-link points to another grain that elaborates on this relationship.
+
+### Building a course knowledge graph
+
+A course knowledge graph is built by accumulating Fact grains where concepts serve as subjects and objects, and relationships serve as relations. The subject-relation-object model from Section 8.1 maps naturally to knowledge graph nodes and edges:
+
+```json
+{
+  "type": "fact",
+  "subject": "linear-algebra",
+  "relation": "prerequisite_for",
+  "object": "machine-learning",
+  "confidence": 0.95,
+  "source_type": "user_explicit",
+  "created_at": 1768471200000,
+  "namespace": "course:cs101:fall2026",
+  "structural_tags": ["math", "prerequisites", "curriculum"],
+  "context": {"source": "syllabus", "section": "prerequisites"}
+}
+```
+
+```json
+{
+  "type": "fact",
+  "subject": "gradient-descent",
+  "relation": "is_subset_of",
+  "object": "optimization-algorithms",
+  "confidence": 0.98,
+  "source_type": "user_explicit",
+  "created_at": 1768471200100,
+  "namespace": "course:cs101:fall2026",
+  "structural_tags": ["ml", "optimization", "algorithms"]
+}
+```
+
+```json
+{
+  "type": "fact",
+  "subject": "neural-networks",
+  "relation": "related_to",
+  "object": "gradient-descent",
+  "confidence": 0.92,
+  "source_type": "consolidated",
+  "created_at": 1768471200200,
+  "namespace": "course:cs101:fall2026",
+  "structural_tags": ["ml", "neural-networks", "training"]
+}
+```
+
+Each Fact grain is a knowledge graph edge. The `subject` and `object` are nodes. The `relation` is the edge label. The `confidence` field (float64, range [0.0, 1.0] per Section 8.1) indicates how certain we are about the relationship. The `structural_tags` field (Section 6.1) provides topic classification for filtering and browsing.
+
+The OMS spec notes in Section 8.1 that the Fact type follows RDF mapping: `<grain:subject> <grain:relation> "grain:object" .` This means any OMS knowledge graph can be exported to standard RDF/SPARQL systems for interoperability with existing educational knowledge bases.
+
+<Callout type="info">
+The `confidence` field distinguishes well-established knowledge (0.99 for "machine-learning is_subset_of artificial-intelligence") from more tentative claims (0.7 for "this teaching approach improves retention"). When knowledge is consolidated from multiple student interactions, the `consolidation_level` field tracks the depth of processing: 0=raw, 1=frequency (appeared in many episodes), 2=pattern (co-occurrence detected), 3=sequence (temporal or causal chain).
+</Callout>
+
+## Provenance chains as citation trails
+
+Research integrity depends on citation — every claim must trace back to its sources. OMS builds this into the grain format through two complementary mechanisms: the `provenance_chain` field (Section 14.1) and the `related_to` cross-links (Section 14.2).
+
+### From source to conclusion
+
+Every derived Fact carries a `provenance_chain` — an array of entries, each with a `source_hash` (content address of the source grain), `method` (how it was derived), and `weight` (how much this source contributed, range 0.0 to 1.0):
+
+```json
+{
+  "type": "fact",
+  "subject": "spaced-repetition",
+  "relation": "improves",
+  "object": "long-term-retention",
+  "confidence": 0.88,
+  "source_type": "consolidated",
+  "created_at": 1768471200000,
+  "namespace": "research:lab:nlp",
+  "provenance_chain": [
+    {
+      "source_hash": "<hash-of-study-1-episode>",
+      "method": "direct_input",
+      "weight": 0.6
+    },
+    {
+      "source_hash": "<hash-of-study-2-episode>",
+      "method": "frequency_consolidation",
+      "weight": 0.4
+    }
+  ],
+  "derived_from": [
+    "<hash-of-study-1-episode>",
+    "<hash-of-study-2-episode>"
+  ]
+}
+```
+
+The `provenance_chain` records the full derivation trail. The `derived_from` field (Section 6.1) carries the parent content addresses. Together, they create a citation graph that traces every conclusion back to its source data.
+
+### Cross-links for scholarly relationships
+
+The `related_to` field (Section 14.2) enables semantic links between grains using a closed vocabulary of relation types (Section 14.3). Several of these map directly to scholarly relationships:
+
+| Relation type | Scholarly meaning | Direction |
+|---------------|-------------------|-----------|
+| `supports` | Provides corroborating evidence | Asymmetric |
+| `elaborates` | Adds detail or specificity to a claim | Asymmetric |
+| `generalizes` | More abstract version of a claim | Asymmetric |
+| `depends_on` | Validity depends on referenced grain — prerequisite knowledge | Asymmetric |
+| `contradicts` | Incompatible claims — conflicting findings | Symmetric |
+| `refutes` | Provides contradicting evidence (weaker than contradicts) | Asymmetric |
+
+A research finding that is supported by multiple independent studies can express this through cross-links:
+
+```json
+{
+  "type": "fact",
+  "subject": "transformer-attention",
+  "relation": "outperforms",
+  "object": "recurrent-models-on-long-sequences",
+  "confidence": 0.93,
+  "source_type": "consolidated",
+  "created_at": 1768471200000,
+  "namespace": "research:lab:nlp",
+  "related_to": [
+    {
+      "hash": "<hash-of-empirical-study-1>",
+      "relation_type": "supports",
+      "weight": 0.9
+    },
+    {
+      "hash": "<hash-of-empirical-study-2>",
+      "relation_type": "supports",
+      "weight": 0.85
+    },
+    {
+      "hash": "<hash-of-theoretical-analysis>",
+      "relation_type": "elaborates",
+      "weight": 0.7
+    },
+    {
+      "hash": "<hash-of-general-architecture-claim>",
+      "relation_type": "generalizes",
+      "weight": 0.6
+    }
+  ]
+}
+```
+
+Each cross-link entry uses field compaction (Section 14.2): `hash` becomes `h`, `relation_type` becomes `rl`, and `weight` becomes `w`. The `weight` field is a float64 indicating how strongly this link applies.
+
+<Callout type="info">
+The relation type vocabulary is intentionally closed (Section 14.3) to prevent PII leakage through relation names. This is a security decision, not a limitation — the eleven relation types cover the core scholarly relationships, and the `context` map on individual grains can carry additional domain-specific metadata.
+</Callout>
+
+## Episodes for student interactions
+
+Every tutoring conversation, question-answer session, and lab notebook entry is raw interaction data — the kind of unstructured record that the Episode memory type (Section 8.2) is designed to capture.
+
+### Capturing interactions
+
+```json
+{
+  "type": "episode",
+  "content": "Student asked: 'Why does gradient descent sometimes get stuck in local minima?' Tutor explained saddle points, learning rate schedules, and the difference between convex and non-convex optimization. Student followed up with a question about Adam optimizer.",
+  "created_at": 1768471200000,
+  "user_id": "student-bob-042",
+  "namespace": "course:cs101:fall2026",
+  "importance": 0.6,
+  "consolidated": false,
+  "structural_tags": ["tutoring", "optimization", "gradient-descent"]
+}
+```
+
+The `consolidated` field (Section 8.2) starts as `false` — this Episode has not yet been processed. Once a consolidation process extracts structured Facts from this interaction, the Episode is marked as consolidated. Since grains are immutable, "marking" means creating a new Episode grain with `consolidated: true` that supersedes the original through the supersession chain.
+
+The consolidation pipeline (described in the spec's Episode lifecycle) works like this:
+
+1. **Capture**: Raw interaction recorded as Episode with `consolidated` absent (defaults to `false`)
+2. **Consolidation**: An LLM or pattern-matching engine extracts structured Facts
+3. **Tracking**: Extracted Facts carry `consolidation_level` (0=raw, 1=frequency, 2=pattern, 3=sequence)
+4. **Provenance**: Facts link back to source Episodes via `derived_from` and `provenance_chain`
+5. **Marking**: Original Episode superseded by a new grain with `consolidated: true`
+
+From the tutoring session above, consolidation might extract:
+
+```json
+{
+  "type": "fact",
+  "subject": "student-bob-042",
+  "relation": "has_difficulty_with",
+  "object": "local-minima-in-gradient-descent",
+  "confidence": 0.8,
+  "source_type": "consolidated",
+  "created_at": 1768471200500,
+  "consolidation_level": 0,
+  "derived_from": ["<hash-of-tutoring-episode>"],
+  "namespace": "student:bob:portfolio",
+  "provenance_chain": [
+    {
+      "source_hash": "<hash-of-tutoring-episode>",
+      "method": "direct_input",
+      "weight": 1.0
+    }
+  ]
+}
+```
+
+### Multimedia episodes with content references
+
+Lab sessions and lecture recordings are not just text. The `content_refs` field (Section 7.1) allows Episodes to reference multimedia content:
+
+```json
+{
+  "type": "episode",
+  "content": "Week 5 lecture on convolutional neural networks. Covered kernel operations, pooling layers, and feature hierarchies. Live coding demo of LeNet-5 implementation.",
+  "created_at": 1768471200000,
+  "namespace": "course:cs101:fall2026",
+  "structural_tags": ["lecture", "cnn", "week-5"],
+  "content_refs": [
+    {
+      "uri": "cas://sha256:a1b2c3d4...",
+      "modality": "video",
+      "mime_type": "video/mp4",
+      "size_bytes": 524288000,
+      "checksum": "sha256:a1b2c3d4...",
+      "metadata": {"width": 1920, "height": 1080, "fps": 30, "duration_ms": 3600000, "codec": "h264"}
+    },
+    {
+      "uri": "cas://sha256:b2c3d4e5...",
+      "modality": "audio",
+      "mime_type": "audio/aac",
+      "size_bytes": 28800000,
+      "checksum": "sha256:b2c3d4e5...",
+      "metadata": {"sample_rate_hz": 48000, "channels": 2, "duration_ms": 3600000}
+    },
+    {
+      "uri": "cas://sha256:c3d4e5f6...",
+      "modality": "image",
+      "mime_type": "image/png",
+      "size_bytes": 2048576,
+      "checksum": "sha256:c3d4e5f6...",
+      "metadata": {"width": 1920, "height": 1080, "color_space": "sRGB"}
+    }
+  ]
+}
+```
+
+The video metadata schema (Section 7.3) includes `width`, `height`, `fps`, `duration_ms`, and `codec`. The audio schema includes `sample_rate_hz`, `channels`, and `duration_ms`. The image schema includes `width`, `height`, and `color_space`. Each content reference carries a `checksum` for integrity verification — Section 20.5 requires that implementations verify checksums after fetching.
+
+## Goals for learning objectives
+
+The Goal memory type (Section 8.7) maps directly to learning objectives with lifecycle semantics that track a student's progress from enrollment through mastery.
+
+### Curriculum hierarchy
+
+Goals support DAG-structured hierarchies through the `parent_goals` field — an array of content addresses, not a single parent pointer. This enables curriculum modeling:
+
+**Course-level goal:**
+```json
+{
+  "type": "goal",
+  "subject": "student-alice-017",
+  "description": "Master linear algebra fundamentals",
+  "goal_state": "active",
+  "source_type": "user_explicit",
+  "created_at": 1768471200000,
+  "namespace": "course:cs101:fall2026",
+  "criteria": [
+    "solve systems of equations",
+    "compute eigenvalues",
+    "understand vector spaces"
+  ],
+  "criteria_structured": [
+    {
+      "metric": "assessment_score_linear_systems",
+      "operator": "gte",
+      "threshold": 0.8,
+      "measurement_ns": "course:cs101:assessments"
+    },
+    {
+      "metric": "assessment_score_eigenvalues",
+      "operator": "gte",
+      "threshold": 0.75,
+      "measurement_ns": "course:cs101:assessments"
+    }
+  ],
+  "priority": 2,
+  "progress": 0.0
+}
+```
+
+**Module-level goal:**
+```json
+{
+  "type": "goal",
+  "subject": "student-alice-017",
+  "description": "Complete systems of equations module",
+  "goal_state": "active",
+  "source_type": "system",
+  "created_at": 1768471200100,
+  "namespace": "course:cs101:fall2026",
+  "parent_goals": ["<hash-of-master-linear-algebra-goal>"],
+  "criteria": ["solve 2x2 systems", "solve 3x3 systems", "apply Gaussian elimination"],
+  "priority": 2,
+  "progress": 0.0,
+  "provenance_chain": [
+    {
+      "source_hash": "<hash-of-master-linear-algebra-goal>",
+      "method": "goal_decomposition",
+      "weight": 1.0
+    }
+  ]
+}
+```
+
+**Lesson-level goal:**
+```json
+{
+  "type": "goal",
+  "subject": "student-alice-017",
+  "description": "Solve 2x2 linear systems using substitution and elimination",
+  "goal_state": "active",
+  "source_type": "system",
+  "created_at": 1768471200200,
+  "namespace": "course:cs101:fall2026",
+  "parent_goals": ["<hash-of-systems-of-equations-goal>"],
+  "criteria_structured": [
+    {
+      "metric": "practice_problems_correct_ratio",
+      "operator": "gte",
+      "threshold": 0.85,
+      "window_ms": 604800000,
+      "measurement_ns": "course:cs101:practice"
+    }
+  ],
+  "priority": 3,
+  "progress": 0.0
+}
+```
+
+The hierarchy flows: course goal decomposes to module goals, module goals decompose to lesson goals. Each uses `method: "goal_decomposition"` in the provenance chain (Section 8.7, provenance chain methods table).
+
+### Progress tracking and state lifecycle
+
+The `progress` field (Section 8.7) is a float64 in range [0.0, 1.0] — an agent-assessed progress estimate. As a student completes practice problems and assessments, the agent updates progress by creating new Goal grains through the supersession chain:
+
+```
+G1: goal_state="active", progress=0.0
+G2: goal_state="active", progress=0.45, derived_from=[<hash-G1>]
+G3: goal_state="active", progress=0.82, derived_from=[<hash-G2>]
+G4: goal_state="satisfied", progress=1.0, derived_from=[<hash-G3>],
+    satisfaction_evidence=[<assessment-toolcall-hash>, <practice-observation-hash>],
+    state_reason="All criteria verified — assessment score 0.88 exceeds threshold 0.8"
+```
+
+The `goal_state` lifecycle has four states (Section 8.7): `"active"`, `"satisfied"`, `"failed"`, and `"suspended"`. A course break maps to `"suspended"`. A completed module maps to `"satisfied"` with `satisfaction_evidence` referencing the assessment ToolCall or Observation grains that substantiate the transition. Each state transition creates a new immutable grain in the supersession chain.
+
+<Callout type="success">
+The `criteria_structured` schema (Section 8.7) allows machine-evaluable success conditions. An educational platform can automatically check whether a student's `practice_problems_correct_ratio` exceeds the threshold within the evaluation `window_ms` by querying the `measurement_ns` namespace — enabling automated progress assessment without manual grading for practice work.
+</Callout>
+
+## Embedding references for semantic search
+
+As a knowledge graph grows — hundreds of concepts, thousands of relationships — students and researchers need to find relevant information by meaning, not just by keyword. OMS supports this through embedding references (Section 7.2).
+
+Each grain can carry an `embedding_refs` array:
+
+```json
+{
+  "type": "fact",
+  "subject": "backpropagation",
+  "relation": "is_algorithm_for",
+  "object": "training-neural-networks",
+  "confidence": 0.99,
+  "source_type": "user_explicit",
+  "created_at": 1768471200000,
+  "namespace": "course:cs101:fall2026",
+  "embedding_refs": [
+    {
+      "vector_id": "vec-bp-001",
+      "model": "text-embedding-3-large",
+      "dimensions": 3072,
+      "modality_source": "text",
+      "distance_metric": "cosine"
+    }
+  ]
+}
+```
+
+The embedding reference schema (Section 7.2) has three required fields: `vector_id` (ID in the vector store), `model` (embedding model name), and `dimensions` (vector dimensionality, e.g., 3072 for text-embedding-3-large). The optional `modality_source` field indicates what was embedded (`"text"`, `"image"`, `"audio"`, etc.), and `distance_metric` specifies the comparison metric (`"cosine"`, `"l2"`, `"dot"`).
+
+With embedding refs across the knowledge graph, a student can query "find concepts related to gradient computation" and get semantically similar grains — backpropagation, chain rule, automatic differentiation — ranked by cosine similarity. The vector search happens in the external vector store; the OMS grain carries the reference that links the knowledge graph node to its vector representation.
+
+The `has_embedding_refs` flag (bit 4 in the header flags byte, Section 3.1.1) enables O(1) filtering: scan grain headers to find all grains with associated embeddings without deserializing any payloads.
+
+## Research reproducibility
+
+Research reproducibility is perhaps the most compelling application of OMS in academic settings. The core requirement is that every conclusion traces back through a verifiable chain to the original data and methods.
+
+### The reproducibility chain
+
+OMS achieves this through the convergence of three features:
+
+**Content addressing** (Section 5) ensures that every grain — every data point, every method call, every intermediate result, every conclusion — is identified by the SHA-256 hash of its exact binary representation. If a byte changes, the hash changes. This means "grain X" refers to exactly one immutable set of bytes, forever.
+
+**Provenance chains** (Section 14.1) trace every derived grain back to its sources:
+
+```
+Conclusion (Fact):
+  "spaced-repetition improves long-term-retention"
+  confidence: 0.88
+  provenance_chain:
+    → source_hash: <analysis-toolcall>, method: "frequency_consolidation"
+    → source_hash: <study-1-episode>, method: "direct_input"
+
+Analysis (ToolCall):
+  tool_name: "statistical_analysis"
+  arguments: {"method": "paired_t_test", "alpha": 0.05}
+  result: {"t_statistic": 4.23, "p_value": 0.0002}
+  success: true
+  derived_from: [<study-1-episode>, <study-2-episode>]
+
+Study 1 (Episode):
+  content: "Experiment session 1: 40 participants..."
+  content_refs: [{modality: "document", uri: "cas://sha256:..."}]
+
+Study 2 (Episode):
+  content: "Experiment session 2: 38 participants..."
+  content_refs: [{modality: "document", uri: "cas://sha256:..."}]
+```
+
+Every conclusion (Fact) traces through the provenance chain to the analysis methods (ToolCalls) and source data (Episodes, Observations). The ToolCall grain records exactly what analysis was run (`tool_name`, `arguments`), whether it succeeded (`success`), and what the result was (`result`). Content references on the Episode grains point to the raw experimental data with SHA-256 checksums for integrity.
+
+**Immutability** ensures that none of these grains can be modified after creation. The original data, the analysis method, and the conclusion are all permanent records. If the analysis needs to be re-run with different parameters, a new ToolCall grain is created — it does not replace the old one. If the conclusion changes, a new Fact grain supersedes the previous one through the supersession chain. The complete history is always available.
+
+<Callout type="warning">
+Content addressing ensures byte-identical replication — the same data serialized at the same timestamp on any conformant implementation produces the same content address. But per Section 5.5, two grains with identical semantic content but different `created_at` timestamps produce different content addresses. For reproducibility, this means the original grain's content address is the canonical reference, not a re-serialization.
+</Callout>
+
+### ToolCalls as method records
+
+The ToolCall memory type (Section 8.5) is particularly valuable for research reproducibility. Every computational step — statistical tests, model training runs, data transformations — is recorded as a ToolCall grain:
+
+```json
+{
+  "type": "tool_call",
+  "tool_name": "train_classifier",
+  "arguments": {
+    "model": "logistic_regression",
+    "features": ["study_hours", "practice_score", "attendance"],
+    "target": "exam_pass",
+    "train_split": 0.8,
+    "random_seed": 42
+  },
+  "result": {
+    "accuracy": 0.87,
+    "precision": 0.85,
+    "recall": 0.89,
+    "f1": 0.87
+  },
+  "success": true,
+  "duration_ms": 4500,
+  "created_at": 1768471200000,
+  "namespace": "research:lab:nlp",
+  "author_did": "did:key:z6MkResearcherAlice..."
+}
+```
+
+The `arguments` map records every parameter. The `result` field records every output metric. The `duration_ms` field records execution time. Another researcher can verify the exact method used and either reproduce it or identify precisely where their methodology differs.
+
+## Namespace strategy
+
+OMS namespaces (Section 6.1, `namespace` field, default `"shared"`) partition memory into logical spaces. For education and research, a hierarchical naming convention keeps content organized:
+
+| Namespace | Scope | Content |
+|-----------|-------|---------|
+| `course:cs101:fall2026` | Course instance | Curriculum facts, lecture episodes, assessments |
+| `research:lab:nlp` | Research lab | Experimental data, analysis results, findings |
+| `student:alice:portfolio` | Individual student | Learning progress, personal knowledge graph, assessments |
+
+The first two bytes of SHA-256(namespace) are stored in the fixed header (bytes 3-4) as a routing hint (Section 3.1.1), enabling efficient namespace-based filtering without deserialization. A query for "all grains in course:cs101:fall2026" can pre-filter by namespace hash before any payload parsing.
+
+Namespace separation also has compliance implications. A student's personal data lives in `student:alice:portfolio` with the `user_id` field set for GDPR scoping. Course-level content in `course:cs101:fall2026` is organizational. Research data in `research:lab:nlp` may carry different sensitivity classifications (Section 13.1) depending on whether it involves human subjects.
+
+## The complete picture: a semester of learning
+
+Here is how the pieces fit together across a semester.
+
+**Week 1**: The course knowledge graph is seeded with Fact grains — concept definitions, prerequisite relationships, topic classifications. Each grain carries `structural_tags` for topic navigation and `context` maps for source attribution (textbook, chapter, section).
+
+**Weeks 2-14**: As students interact with the AI tutor, Episodes capture every tutoring session, question-answer exchange, and lab notebook entry. The `consolidated` field tracks which episodes have been processed. Consolidation extracts Facts about student understanding — what they know, what they struggle with, what misconceptions they hold.
+
+**Throughout**: Goal grains track learning objectives at course, module, and lesson levels. Progress updates flow through the supersession chain. Assessment results become ToolCall grains and Observation grains that serve as `satisfaction_evidence` for goal completion.
+
+**Research component**: Students conducting research have their experimental data captured as Episodes with content references to raw data files. Analysis steps are recorded as ToolCall grains. Conclusions become Facts with provenance chains tracing back through every analysis to the original data.
+
+**Semantic search**: Embedding references across the knowledge graph enable "find concepts similar to X" queries, helping students discover connections they might not have found through keyword search alone.
+
+**At semester end**: The complete learning history — every interaction, every assessment, every knowledge claim, every citation chain — is a collection of immutable, content-addressed grains. A student's portfolio in namespace `student:alice:portfolio` is portable, verifiable, and auditable. A researcher's findings in namespace `research:lab:nlp` are reproducible by anyone with access to the grain collection and the referenced data.
+
+## Summary
+
+OMS maps to education and research through the natural alignment between its memory types and academic needs. Facts model knowledge graph triples with subject-relation-object semantics, confidence scores, and source attribution. Provenance chains serve as citation trails where every derived claim traces back to source materials through content-addressed links. Episodes capture the raw interactions — tutoring sessions, lab notes, lectures — that feed the consolidation pipeline. Goals track learning objectives through a lifecycle of active, satisfied, failed, and suspended states, with machine-evaluable criteria and DAG-structured curriculum hierarchies. Embedding references enable semantic search across the entire knowledge graph. And content addressing guarantees that every grain in a research chain is immutable and verifiable — the foundation of reproducible scholarship.
+
+The result is a memory format where knowledge graphs are built from verifiable triples, every conclusion cites its sources through cryptographic links, every student interaction is preserved for longitudinal analysis, and every research finding is reproducible from first principles.

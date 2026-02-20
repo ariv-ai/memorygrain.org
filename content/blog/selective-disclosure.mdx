@@ -1,0 +1,200 @@
+---
+title: "Selective Disclosure: Field-Level Privacy for Memory Grains"
+description: "OMS lets you prove a fact exists without revealing its sensitive fields. Inspired by SD-JWT (RFC 9901), selective disclosure replaces chosen values with SHA-256 hashes — enabling GDPR-compliant sharing, inter-company collaboration, and court-admissible redaction at the grain level."
+date: "2026-02-19"
+readTime: "11 min read"
+tags: ["privacy", "selective-disclosure", "compliance", "security"]
+---
+
+A medical AI agent discovers that a patient has a dangerous drug interaction. The agent needs to share this insight with a pharmacist's system, but it cannot expose the patient's identity, internal user ID, or the organization's namespace structure. The fact must be provably real — not fabricated — but the sensitive fields must be invisible.
+
+This is the problem selective disclosure solves. Section 10 of the Open Memory Specification defines a field-level privacy mechanism inspired by [SD-JWT (RFC 9901)](https://www.rfc-editor.org/rfc/rfc9901) that lets a grain holder share some fields while cryptographically hiding others. The receiver can verify that hidden fields exist and have not been tampered with, without ever seeing their values.
+
+## The core idea: elision, not encryption
+
+Selective disclosure in OMS is not encryption. It is **elision** — the deliberate replacement of a field's value with the SHA-256 hash of that value. The original grain remains intact in the creator's storage. What the receiver gets is a derived view: a disclosed grain where certain fields have been replaced by hashes in an `_elided` map, with a `_disclosure_of` field linking back to the original grain's content address.
+
+This approach has a critical property: the receiver can independently verify any field that is later revealed. If someone hands them the actual value of an elided field, they can hash it themselves and compare the result against the entry in `_elided`. Match means the value is authentic. No match means it has been forged.
+
+## The elision model in practice
+
+Section 10.1 of the spec illustrates the model with a concrete example. Consider a Fact grain recording that Alice works at ACME Corp:
+
+**Full grain** (held by the creator):
+
+```json
+{
+  "type": "fact",
+  "subject": "Alice",
+  "relation": "works_at",
+  "object": "ACME Corp",
+  "user_id": "alice-123",
+  "namespace": "hr",
+  "created_at": 1737000000000
+}
+```
+
+This grain contains two fields that might be sensitive in a sharing scenario: `user_id` (which is personal data under GDPR) and `namespace` (which reveals organizational structure). When the creator shares this grain with a third party, those fields are elided:
+
+**Disclosed grain** (shared with the receiver):
+
+```json
+{
+  "type": "fact",
+  "subject": "Alice",
+  "relation": "works_at",
+  "object": "ACME Corp",
+  "created_at": 1737000000000,
+  "_elided": {
+    "user_id": "sha256:a1b2c3d4...",
+    "namespace": "sha256:e5f6a7b8..."
+  },
+  "_disclosure_of": "sha256:original_grain_hash..."
+}
+```
+
+The receiver sees the fact — Alice works at ACME Corp — but cannot recover the internal user ID or the namespace. The `_disclosure_of` field tells the receiver which original grain this disclosed version was derived from. If the receiver later obtains access to the original (through proper authorization), they can verify byte-for-byte that the disclosed grain was faithfully produced from it.
+
+<Callout type="info">
+The disclosed grain has a different content address than the original. This is by design — the bytes are different, so the SHA-256 hash is different. The `_disclosure_of` field is the link between the two.
+</Callout>
+
+## How elision hashes are computed
+
+Section 10.1.1 specifies the exact computation. The hash stored in `_elided` for each field is:
+
+```
+elision_hash = "sha256:" + lowercase_hex(SHA-256(canonical_msgpack_encode(field_value)))
+```
+
+The hash covers the **value bytes only** — the field name (key) is not included in the hash input. The field value is serialized using the same canonical MessagePack rules that apply to the full grain (Section 4 of the spec): NFC-normalized strings, sorted map keys, omitted nulls, float64 encoding.
+
+The spec provides three examples showing how different value types are handled:
+
+- **String `"alice-123"`**: Encode `"alice-123"` as a MessagePack fixstr, then SHA-256 the resulting bytes.
+- **Float64 `0.95`**: Encode `0.95` as a MessagePack float64 (9 bytes: the format byte plus 8 bytes of IEEE 754 double), then SHA-256 the resulting bytes.
+- **Map `{"k": "v"}`**: Encode as a canonical sorted MessagePack map, then SHA-256 the resulting bytes.
+
+The critical detail is that canonical serialization rules must be applied before hashing. If the creator uses a different string normalization or integer encoding than the verifier, the hashes will not match. This is why OMS specifies canonical serialization so precisely — it makes cross-implementation verification deterministic.
+
+**Verification** works in the other direction: a receiver holding the disclosed grain can verify that a revealed value was faithfully elided by encoding that revealed value with the same canonical MessagePack rules and comparing the resulting SHA-256 against the entry in `_elided`. If the hashes match, the value is authentic.
+
+## Which fields can be elided
+
+Not every field is eligible for elision. Section 10.2 defines a complete table of field elision rules, specifying which fields can be hidden and why certain fields must always remain visible.
+
+**Fields that CANNOT be elided:**
+
+| Field | Reason |
+|-------|--------|
+| `type` | Receiver must know the grain type to interpret it |
+| `relation` | Core knowledge structure — without this, the semantic triple is meaningless |
+| `confidence` | Essential for trust decisions — a receiver must know how reliable the fact is |
+| `created_at` | Essential for temporal queries and ordering |
+| `goal_state` | Essential for routing and trust decisions |
+| `source_type` | Required for human-vs-agent trust decisions |
+| `priority` | Required for cross-system scheduling |
+
+These fields are the structural skeleton of a grain. Without them, a receiver cannot meaningfully process the grain — they would not know what type it is, when it was created, or how much to trust it.
+
+**Fields that CAN be elided:**
+
+| Field | Reason for elidability |
+|-------|------------------------|
+| `subject` | May contain PII |
+| `object` | May contain PII |
+| `user_id` | GDPR personal data |
+| `namespace` | May reveal organizational structure |
+| `provenance_chain` | May reveal system architecture |
+| `context` | May contain sensitive details |
+| `structural_tags` | May reveal classification system |
+| `description` | May reveal strategic intent |
+| `criteria` | May reveal operational thresholds |
+| `criteria_structured` | May reveal operational thresholds |
+| `parent_goals` | May reveal goal hierarchy (system architecture) |
+| `state_reason` | May reveal internal reasoning |
+| `satisfaction_evidence` | May reveal system internals |
+| `delegate_to` | May reveal agent architecture |
+| `delegate_from` | May reveal agent architecture |
+| `rollback_on_failure` | May reveal system control flow |
+
+The pattern is clear: structural fields required for routing, trust, and interpretation must stay visible. Fields that contain personal data, organizational details, or internal system architecture can be hidden. This division ensures that a disclosed grain remains useful to the receiver — they can still route it, evaluate its trustworthiness, and place it in time — while protecting the information that makes it sensitive.
+
+<Callout type="security">
+The elision rules are not advisory — they define what a conformant implementation MUST treat as non-elidable. Hiding the `type` or `confidence` field would make the grain uninterpretable and is not permitted by the spec.
+</Callout>
+
+## Elision in the binary format
+
+When grains are serialized in the compact `.mg` binary format, the selective disclosure fields follow the same field compaction rules as all other fields. Section 10.3 specifies the short keys:
+
+| Full Name | Short Key | Type |
+|-----------|-----------|------|
+| `_elided` | `_e` | map (string to string) |
+| `_disclosure_of` | `_do` | string |
+
+The disclosed grain has a different content address than the original because the bytes are different — elided fields are replaced by hashes, and the `_elided` and `_disclosure_of` fields are added. If the original grain is COSE-signed, the signature covers the original grain's bytes. The receiver can verify all non-elided fields are authentic by checking the signature against the original grain's content address referenced in `_disclosure_of`.
+
+## Canonical form and storage rules
+
+Section 10.4 establishes a fundamental rule: **the original (undisclosed) grain is the canonical form**. Selective disclosure produces a derived view, not a new canonical grain.
+
+This has important implications for storage and verification:
+
+- **The original grain's content address** is the hash of the complete, unelided blob. This is the authoritative identity.
+- **The disclosed grain's content address** is the hash of the elided blob — a different address. The `_disclosure_of` field links back to the original's address.
+- **COSE signatures** wrap and cover the **original** blob. Receivers verify the signature against the original's content address, not the disclosed variant's.
+
+In distributed systems, the spec is explicit about how this should work:
+
+- Primary storage holds the original grain (canonical, fully populated).
+- Disclosed variants are **presentation artifacts** generated on demand. They SHOULD NOT be stored as independent grains.
+- When `_disclosure_of` resolves to an address in the store, the authoritative content is the original grain at that address.
+
+<Callout type="warning">
+Disclosed grains should not be stored independently. They are ephemeral views generated for specific recipients. Storing them as if they were canonical grains would create duplicate, inconsistent records and break the immutability guarantee of the original.
+</Callout>
+
+The rationale behind this design is elegant: treating the original as canonical preserves the immutability guarantee (the original is a fixed point) while allowing dynamic, per-recipient selective disclosure without re-signing or rehashing. The creator signs the grain once. Every disclosed variant generated from it can be verified against that single signature by checking the original's content address.
+
+## Use cases for selective disclosure
+
+The elision model enables several practical scenarios that would otherwise require either full exposure or no sharing at all.
+
+### Medical insights without patient PII
+
+A hospital's AI agent identifies a drug interaction pattern across many patients. The insight — "patients taking Drug A and Drug B have a 3x higher rate of adverse reactions" — is valuable for the pharmaceutical company developing Drug B. But sharing the underlying grains would expose patient identifiers, internal user IDs, and hospital namespace structure.
+
+With selective disclosure, the hospital creates disclosed variants of the relevant Fact grains. The `subject` (patient identifier) and `user_id` are elided. The pharmaceutical company receives grains that prove the facts exist, carry verifiable confidence scores and creation timestamps, and link back to signed originals — but cannot identify any patient.
+
+### Inter-company agent collaboration
+
+Two companies are collaborating on a supply chain optimization project. Their agents need to share workflow and goal grains to coordinate. But each company's `namespace` reveals internal organizational structure, and `delegate_to` / `delegate_from` fields expose which agents handle which tasks.
+
+Selective disclosure lets each company elide `namespace`, `delegate_to`, `delegate_from`, and `parent_goals` before sharing. The receiving company's agent sees the workflow structure and goals but not the internal org chart or agent architecture behind them.
+
+### Regulatory reporting with redaction
+
+A financial services firm must report certain AI-driven decisions to regulators. The grains recording those decisions contain `context` fields with proprietary trading signals and `description` fields with strategic intent. The regulator needs to verify that decisions were made, when they were made, and with what confidence — but the firm should not be required to expose proprietary strategy.
+
+The firm generates disclosed variants with `context`, `description`, and `state_reason` elided. The regulator sees the decision facts, their timestamps, their confidence scores, and their provenance — and can verify through the `_elided` hashes that the hidden fields exist and have not been altered since the original grain was signed.
+
+### Court-admissible evidence with redactions
+
+Legal proceedings may require producing agent memory as evidence. Some fields in those grains are protected by privilege or contain information about uninvolved parties. Selective disclosure produces redacted grains that are still cryptographically linked to the signed originals. The court can verify that the redactions are faithful — the `_elided` hashes prove the hidden fields exist and match specific (undisclosed) values. If the court later orders full disclosure, the original grains can be produced, and every hash can be verified.
+
+## The SD-JWT lineage
+
+OMS selective disclosure is directly inspired by [SD-JWT (RFC 9901)](https://www.rfc-editor.org/rfc/rfc9901), which defines a mechanism for selective disclosure of claims in JSON Web Tokens. The core concept is the same: replace sensitive values with hashes, let the holder choose which fields to reveal for each interaction, and give verifiers the ability to check that revealed values match the original hashes.
+
+The key difference is the substrate. SD-JWT operates on JSON claims within JWT structures. OMS operates on MessagePack-encoded fields within binary `.mg` blobs. The hash computation is adapted accordingly — OMS hashes canonical MessagePack bytes rather than JSON strings — but the privacy model is equivalent: field-level granularity, holder-controlled disclosure, cryptographic verifiability.
+
+This lineage matters because SD-JWT has undergone extensive security review through the IETF standards process. OMS builds on that reviewed foundation rather than inventing a novel privacy mechanism.
+
+## Privacy as a first-class design decision
+
+Selective disclosure is not a bolt-on feature in OMS — it is part of Design Principle 9: **"Share without exposure."** The spec was designed from the start to support the scenario where a grain must be shared but not fully revealed.
+
+This is fundamentally different from the approach most systems take, where privacy is an access-control layer on top of an all-or-nothing data format. In those systems, you either have access to the full record or you do not. OMS provides a middle ground: you can prove a record exists, verify its structural fields, and check its integrity — while specific sensitive values remain hidden behind SHA-256 hashes that are computationally infeasible to reverse.
+
+For production AI systems that cross organizational boundaries — healthcare networks, financial consortiums, government agencies, multi-vendor agent platforms — this middle ground is not optional. It is the difference between systems that can collaborate and systems that cannot.

@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 800" width="1100" height="800">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="srcGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#4f46e5"/>
+    </linearGradient>
+    <linearGradient id="usbGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="gitGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f97316"/>
+      <stop offset="100%" stop-color="#ea580c"/>
+    </linearGradient>
+    <linearGradient id="cloudGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="streamGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ec4899"/>
+      <stop offset="100%" stop-color="#db2777"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <marker id="arrowUSB" markerWidth="12" markerHeight="8" refX="12" refY="4" orient="auto">
+      <path d="M0,0 L12,4 L0,8 Z" fill="#10b981"/>
+    </marker>
+    <marker id="arrowGit" markerWidth="12" markerHeight="8" refX="12" refY="4" orient="auto">
+      <path d="M0,0 L12,4 L0,8 Z" fill="#f97316"/>
+    </marker>
+    <marker id="arrowCloud" markerWidth="12" markerHeight="8" refX="12" refY="4" orient="auto">
+      <path d="M0,0 L12,4 L0,8 Z" fill="#3b82f6"/>
+    </marker>
+    <marker id="arrowStream" markerWidth="12" markerHeight="8" refX="12" refY="4" orient="auto">
+      <path d="M0,0 L12,4 L0,8 Z" fill="#ec4899"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1100" height="800" rx="16" fill="url(#bg)"/>
+  <rect width="1100" height="800" rx="16" fill="none" stroke="#334155" stroke-width="1.5"/>
+
+  <!-- Title -->
+  <text x="550" y="50" text-anchor="middle" fill="#e2e8f0" font-family="Inter, system-ui, sans-serif" font-size="24" font-weight="700" letter-spacing="0.5">.mg File Distribution &amp; Integrity Verification</text>
+
+  <!-- ═══════════════ SOURCE FILE (left side) ═══════════════ -->
+  <g transform="translate(60, 250)" filter="url(#shadow)">
+    <rect width="260" height="240" rx="14" fill="#1e293b" stroke="#6366f1" stroke-width="2"/>
+    <!-- File icon -->
+    <g transform="translate(90, 20)">
+      <rect x="0" y="0" width="80" height="96" rx="5" fill="url(#srcGrad)" opacity="0.9"/>
+      <path d="M52,0 L80,28 L80,96 L0,96 L0,0 Z" fill="url(#srcGrad)"/>
+      <path d="M52,0 L52,28 L80,28" fill="none" stroke="#312e81" stroke-width="1.5"/>
+      <text x="40" y="70" text-anchor="middle" fill="#fff" font-family="monospace" font-size="18" font-weight="700">.mg</text>
+    </g>
+    <!-- Labels -->
+    <text x="130" y="140" text-anchor="middle" fill="#f1f5f9" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="700">raven-001.mg</text>
+    <text x="130" y="168" text-anchor="middle" fill="#94a3b8" font-family="monospace" font-size="13">SHA-256</text>
+    <rect x="18" y="180" width="224" height="32" rx="6" fill="#0f172a" stroke="#475569" stroke-width="0.8"/>
+    <text x="130" y="201" text-anchor="middle" fill="#a78bfa" font-family="monospace" font-size="14" font-weight="600">a3f7c2d8...e91b</text>
+    <text x="130" y="230" text-anchor="middle" fill="#475569" font-family="Inter, sans-serif" font-size="12" font-style="italic">Source of Truth</text>
+  </g>
+
+  <!-- ═══════════════ ARROWS ═══════════════ -->
+  <line x1="320" y1="310" x2="460" y2="158" stroke="#10b981" stroke-width="2.5" stroke-dasharray="8,5" marker-end="url(#arrowUSB)" opacity="0.8"/>
+  <line x1="320" y1="360" x2="460" y2="345" stroke="#f97316" stroke-width="2.5" stroke-dasharray="8,5" marker-end="url(#arrowGit)" opacity="0.8"/>
+  <line x1="320" y1="400" x2="460" y2="530" stroke="#3b82f6" stroke-width="2.5" stroke-dasharray="8,5" marker-end="url(#arrowCloud)" opacity="0.8"/>
+  <line x1="320" y1="440" x2="460" y2="710" stroke="#ec4899" stroke-width="2.5" stroke-dasharray="8,5" marker-end="url(#arrowStream)" opacity="0.8"/>
+
+  <!-- ═══════════════ 1. USB DRIVE ═══════════════ -->
+  <g transform="translate(470, 85)" filter="url(#shadow)">
+    <rect width="580" height="130" rx="12" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+    <!-- Number badge -->
+    <circle cx="36" cy="36" r="18" fill="url(#usbGrad)"/>
+    <text x="36" y="42" text-anchor="middle" fill="#fff" font-family="Inter, sans-serif" font-size="18" font-weight="700">1</text>
+    <!-- USB icon -->
+    <g transform="translate(70, 12)">
+      <rect x="4" y="12" width="30" height="40" rx="4" fill="none" stroke="#10b981" stroke-width="2.5"/>
+      <rect x="10" y="0" width="18" height="16" rx="2" fill="#10b981" opacity="0.6"/>
+      <rect x="14" y="4" width="4" height="6" rx="1" fill="#fff"/>
+      <rect x="20" y="4" width="4" height="6" rx="1" fill="#fff"/>
+    </g>
+    <text x="120" y="32" fill="#10b981" font-family="Inter, sans-serif" font-size="20" font-weight="700">USB Drive</text>
+    <!-- File box -->
+    <rect x="120" y="50" width="430" height="60" rx="8" fill="#0f172a" stroke="#334155" stroke-width="0.8"/>
+    <text x="140" y="76" fill="#86efac" font-family="monospace" font-size="16" font-weight="600">raven-001.mg</text>
+    <text x="140" y="100" fill="#6ee7b7" font-family="monospace" font-size="14">SHA-256: a3f7c2d8...e91b</text>
+    <!-- Checkmark -->
+    <circle cx="520" cy="82" r="12" fill="#059669" opacity="0.3"/>
+    <text x="520" y="87" text-anchor="middle" fill="#6ee7b7" font-family="sans-serif" font-size="16" font-weight="700">✓</text>
+  </g>
+
+  <!-- ═══════════════ 2. GIT REPOSITORY ═══════════════ -->
+  <g transform="translate(470, 265)" filter="url(#shadow)">
+    <rect width="580" height="150" rx="12" fill="#1e293b" stroke="#f97316" stroke-width="2"/>
+    <!-- Number badge -->
+    <circle cx="36" cy="36" r="18" fill="url(#gitGrad)"/>
+    <text x="36" y="42" text-anchor="middle" fill="#fff" font-family="Inter, sans-serif" font-size="18" font-weight="700">2</text>
+    <!-- Git icon -->
+    <g transform="translate(74, 14)">
+      <circle cx="12" cy="8" r="6" fill="none" stroke="#f97316" stroke-width="2.5"/>
+      <circle cx="12" cy="42" r="6" fill="none" stroke="#f97316" stroke-width="2.5"/>
+      <line x1="12" y1="14" x2="12" y2="36" stroke="#f97316" stroke-width="2.5"/>
+    </g>
+    <text x="120" y="32" fill="#f97316" font-family="Inter, sans-serif" font-size="20" font-weight="700">Git Repository</text>
+    <!-- Commit log box -->
+    <rect x="120" y="50" width="430" height="80" rx="8" fill="#0f172a" stroke="#334155" stroke-width="0.8"/>
+    <text x="140" y="76" fill="#fdba74" font-family="monospace" font-size="14">c4e2a1f  add raven-001.mg</text>
+    <text x="140" y="96" fill="#64748b" font-family="monospace" font-size="14">b71d3e9  init .mg tracking</text>
+    <text x="140" y="120" fill="#fb923c" font-family="monospace" font-size="14">SHA-256: a3f7c2d8...e91b</text>
+    <!-- Checkmark -->
+    <circle cx="520" cy="96" r="12" fill="#ea580c" opacity="0.3"/>
+    <text x="520" y="101" text-anchor="middle" fill="#fdba74" font-family="sans-serif" font-size="16" font-weight="700">✓</text>
+  </g>
+
+  <!-- ═══════════════ 3. CLOUD STORAGE ═══════════════ -->
+  <g transform="translate(470, 455)" filter="url(#shadow)">
+    <rect width="580" height="140" rx="12" fill="#1e293b" stroke="#3b82f6" stroke-width="2"/>
+    <!-- Number badge -->
+    <circle cx="36" cy="36" r="18" fill="url(#cloudGrad)"/>
+    <text x="36" y="42" text-anchor="middle" fill="#fff" font-family="Inter, sans-serif" font-size="18" font-weight="700">3</text>
+    <!-- Cloud icon -->
+    <g transform="translate(66, 10)">
+      <path d="M10,40 Q0,40 0,28 Q0,18 10,16 Q10,6 20,6 Q30,6 32,14 Q44,12 44,24 Q44,40 32,40 Z" fill="none" stroke="#3b82f6" stroke-width="2.5"/>
+    </g>
+    <text x="120" y="32" fill="#3b82f6" font-family="Inter, sans-serif" font-size="20" font-weight="700">S3 / GCP / Azure Blob / MinIO</text>
+    <!-- File box -->
+    <rect x="120" y="50" width="430" height="70" rx="8" fill="#0f172a" stroke="#334155" stroke-width="0.8"/>
+    <text x="140" y="76" fill="#93c5fd" font-family="monospace" font-size="15" font-weight="600">s3://mg-vault/raven-001.mg</text>
+    <text x="140" y="106" fill="#60a5fa" font-family="monospace" font-size="14">SHA-256: a3f7c2d8...e91b</text>
+    <!-- Checkmark -->
+    <circle cx="520" cy="86" r="12" fill="#2563eb" opacity="0.3"/>
+    <text x="520" y="91" text-anchor="middle" fill="#93c5fd" font-family="sans-serif" font-size="16" font-weight="700">✓</text>
+  </g>
+
+  <!-- ═══════════════ 4. STREAMING ═══════════════ -->
+  <g transform="translate(470, 640)" filter="url(#shadow)">
+    <rect width="580" height="120" rx="12" fill="#1e293b" stroke="#ec4899" stroke-width="2"/>
+    <!-- Number badge -->
+    <circle cx="36" cy="36" r="18" fill="url(#streamGrad)"/>
+    <text x="36" y="42" text-anchor="middle" fill="#fff" font-family="Inter, sans-serif" font-size="18" font-weight="700">4</text>
+    <!-- Stream icon -->
+    <g transform="translate(68, 16)">
+      <path d="M0,18 Q8,0 16,18 Q24,36 32,18" fill="none" stroke="#ec4899" stroke-width="3" stroke-linecap="round"/>
+    </g>
+    <text x="120" y="32" fill="#ec4899" font-family="Inter, sans-serif" font-size="20" font-weight="700">Kafka / Redis Stream</text>
+    <!-- File box -->
+    <rect x="120" y="50" width="430" height="52" rx="8" fill="#0f172a" stroke="#334155" stroke-width="0.8"/>
+    <text x="140" y="73" fill="#f9a8d4" font-family="monospace" font-size="15" font-weight="600">topic:mg-ingest → raven-001.mg</text>
+    <text x="140" y="94" fill="#f472b6" font-family="monospace" font-size="14">SHA-256: a3f7c2d8...e91b</text>
+    <!-- Checkmark -->
+    <circle cx="520" cy="78" r="12" fill="#db2777" opacity="0.3"/>
+    <text x="520" y="83" text-anchor="middle" fill="#f9a8d4" font-family="sans-serif" font-size="16" font-weight="700">✓</text>
+  </g>
+
+</svg>

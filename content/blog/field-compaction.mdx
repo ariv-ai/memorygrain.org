@@ -1,0 +1,310 @@
+---
+title: "Field Compaction: Shrinking Grains Without Losing Meaning"
+description: "How OMS maps human-readable field names to compact short keys for efficient binary storage — a complete guide to Section 6 of the Open Memory Specification, covering core fields, type-specific fields, compaction rules, and nested compaction boundaries."
+date: "2026-02-19"
+readTime: "12 min read"
+tags: ["field-compaction", "optimization", "binary-format", "technical"]
+---
+
+A Fact grain in the Open Memory Specification has fields like `subject`, `relation`, `object`, `confidence`, `source_type`, `created_at`, `author_did`, and `namespace`. Those are clear, readable names — exactly what you want when designing a schema. But when you are serializing millions of grains into compact binary blobs, every byte counts.
+
+The string `"confidence"` is 10 bytes in UTF-8. The string `"c"` is 1 byte. Multiply that saving across every field in every grain in a store with millions of entries, and field compaction becomes a significant optimization.
+
+Section 6 of the OMS v1.0 specification defines a **bijective mapping** — a one-to-one, reversible correspondence — between human-readable field names and short keys. Serializers replace full names with short keys before encoding. Deserializers reverse the mapping after decoding. The grain's logical structure is preserved exactly; only the wire representation changes.
+
+## How Compaction Works
+
+The concept is straightforward:
+
+1. Before serialization, every known field name is replaced with its short key from the field map.
+2. The grain is serialized (sorted, encoded as MessagePack) using the short keys.
+3. After deserialization, every short key is replaced with its full field name.
+
+Because the mapping is bijective (every full name maps to exactly one short key, and vice versa), this transformation is perfectly reversible. No information is lost. The grain you get after deserialization is identical to the grain you started with before serialization.
+
+## Core Fields (Section 6.1)
+
+The core field map applies to all seven memory types. Here is the complete table:
+
+| Full Name | Short Key | Type | Description |
+|-----------|-----------|------|-------------|
+| `type` | `t` | string | Memory type: "fact", "episode", etc. |
+| `subject` | `s` | string | Entity being described (RDF subject) |
+| `relation` | `r` | string | Semantic relationship (RDF predicate) |
+| `object` | `o` | string | Value or target (RDF object) |
+| `confidence` | `c` | float64 | Credibility score [0.0, 1.0] |
+| `source_type` | `st` | string | Provenance origin (open enum) |
+| `created_at` | `ca` | int64 | Creation timestamp (epoch ms) |
+| `temporal_type` | `tt` | string | "state" or "observation" |
+| `valid_from` | `vf` | int64 | Temporal validity start (epoch ms) |
+| `valid_to` | `vt` | int64 | Temporal validity end (epoch ms) |
+| `system_valid_from` | `svf` | int64 | When grain became active in system |
+| `system_valid_to` | `svt` | int64 | When grain was superseded in system |
+| `context` | `ctx` | map | Contextual metadata (string to string) |
+| `superseded_by` | `sb` | string | Content address of superseding grain |
+| `contradicted` | `ct` | bool | Whether this grain is contradicted |
+| `importance` | `im` | float64 | Importance weighting [0.0, 1.0] |
+| `author_did` | `adid` | string | DID of creating agent |
+| `namespace` | `ns` | string | Memory partition/category |
+| `user_id` | `user` | string | Associated data subject (GDPR) |
+| `structural_tags` | `tags` | array[string] | Classification tags |
+| `derived_from` | `df` | array[string] | Parent content addresses |
+| `consolidation_level` | `cl` | int | 0=raw, 1=frequency, 2=pattern, 3=sequence |
+| `success_count` | `sc` | int | Feedback: successful uses |
+| `failure_count` | `fc` | int | Feedback: failed uses |
+| `provenance_chain` | `pc` | array[map] | Full derivation trail |
+| `origin_did` | `odid` | string | Original source agent DID |
+| `origin_namespace` | `ons` | string | Original source namespace |
+| `content_refs` | `cr` | array[map] | References to external content |
+| `embedding_refs` | `er` | array[map] | References to vector embeddings |
+| `related_to` | `rt` | array[map] | Cross-links to related grains |
+| `_elided` | `_e` | map | Selective disclosure: elided field hashes |
+| `_disclosure_of` | `_do` | string | Content address of original grain (if disclosed) |
+| `invalidation_policy` | `ip` | map | Protection policy governing supersession |
+| `supersession_justification` | `sj` | string | Required when superseding a soft-locked grain |
+| `supersession_auth` | `sa` | array | COSE signatures authorizing quorum supersession |
+
+That is 34 core field mappings. Some short keys are mnemonic (`t` for type, `s` for subject, `c` for confidence), while others use abbreviations (`adid` for author_did, `svf` for system_valid_from). The mapping is normative — implementations MUST NOT invent their own short keys.
+
+## Type-Specific Fields
+
+Beyond the core fields, each memory type defines additional fields with their own compaction mappings.
+
+### Episode (Section 6.2)
+
+| Full Name | Short Key | Type |
+|-----------|-----------|------|
+| `content` | `content` | string |
+| `consolidated` | `consolidated` | bool |
+
+Note that Episode fields retain their full names as short keys. The names are already concise enough that compaction provides no benefit.
+
+### Checkpoint (Section 6.3)
+
+| Full Name | Short Key | Type |
+|-----------|-----------|------|
+| `plan` | `plan` | array[string] |
+| `history` | `history` | array[map] |
+
+Like Episode, Checkpoint fields are already short and retain their names.
+
+### Workflow (Section 6.4)
+
+| Full Name | Short Key | Type |
+|-----------|-----------|------|
+| `steps` | `steps` | array[string] |
+| `trigger` | `trigger` | string |
+
+Again, these field names are short enough that the mapping is an identity function.
+
+### ToolCall (Section 6.5)
+
+| Full Name | Short Key | Type |
+|-----------|-----------|------|
+| `tool_name` | `tn` | string |
+| `arguments` | `args` | map |
+| `result` | `res` | any |
+| `success` | `ok` | bool |
+| `error` | `err` | string |
+| `duration_ms` | `dur` | int |
+| `parent_task_id` | `ptid` | string |
+
+ToolCall fields see meaningful compaction. `tool_name` (9 bytes) becomes `tn` (2 bytes). `arguments` (9 bytes) becomes `args` (4 bytes). `success` (7 bytes) becomes `ok` (2 bytes). For agents that make thousands of tool calls, this adds up.
+
+### Observation (Section 6.6)
+
+| Full Name | Short Key | Type | Note |
+|-----------|-----------|------|------|
+| `observer_id` | `oid` | string | v1.0 `sensor_id` / `sid` accepted as deprecated alias |
+| `observer_type` | `otype` | string | v1.0 `sensor_type` / `stype` accepted as deprecated alias |
+| `frame_id` | `fid` | string | |
+| `sync_group` | `sg` | string | |
+
+Observation grains from high-frequency sensor data (LiDAR, cameras, IMUs) and cognitive agents benefit from compaction because they are produced in large volumes. Deserializers encountering the deprecated short keys `sid` or `stype` MUST map them to `observer_id` and `observer_type` respectively.
+
+### Goal (Section 6.7)
+
+Goal has the most type-specific fields of any memory type, reflecting its rich lifecycle semantics:
+
+| Full Name | Short Key | Type |
+|-----------|-----------|------|
+| `description` | `desc` | string |
+| `goal_state` | `gs` | string |
+| `criteria` | `crit` | array[string] |
+| `criteria_structured` | `crs` | array[map] |
+| `priority` | `pri` | int |
+| `parent_goals` | `pgs` | array[string] |
+| `state_reason` | `sr` | string |
+| `satisfaction_evidence` | `se` | array[string] |
+| `progress` | `prog` | float64 |
+| `delegate_to` | `dto` | string |
+| `delegate_from` | `dfo` | string |
+| `expiry_policy` | `ep` | string |
+| `recurrence` | `rec` | string |
+| `evidence_required` | `evreq` | int |
+| `rollback_on_failure` | `rof` | array[string] |
+| `allowed_transitions` | `atr` | array[string] |
+
+Sixteen Goal-specific mappings. Fields like `satisfaction_evidence` (23 bytes) compacting to `se` (2 bytes) and `rollback_on_failure` (19 bytes) compacting to `rof` (3 bytes) provide substantial savings on richly annotated goals.
+
+## Before and After: A Compaction Example
+
+To see the impact, consider a Fact grain before and after field compaction.
+
+**Before compaction (human-readable):**
+
+```json
+{
+  "type": "fact",
+  "subject": "Alice",
+  "relation": "works_at",
+  "object": "ACME Corp",
+  "confidence": 0.95,
+  "source_type": "user_explicit",
+  "created_at": 1768471200000,
+  "author_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+  "namespace": "hr",
+  "importance": 0.8,
+  "structural_tags": ["employment", "current"]
+}
+```
+
+**After compaction (short keys):**
+
+```json
+{
+  "t": "fact",
+  "s": "Alice",
+  "r": "works_at",
+  "o": "ACME Corp",
+  "c": 0.95,
+  "st": "user_explicit",
+  "ca": 1768471200000,
+  "adid": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+  "ns": "hr",
+  "im": 0.8,
+  "tags": ["employment", "current"]
+}
+```
+
+Counting just the key bytes (not the values, which are unchanged):
+
+| Full Key | Bytes | Short Key | Bytes | Saved |
+|----------|-------|-----------|-------|-------|
+| `type` | 4 | `t` | 1 | 3 |
+| `subject` | 7 | `s` | 1 | 6 |
+| `relation` | 8 | `r` | 1 | 7 |
+| `object` | 6 | `o` | 1 | 5 |
+| `confidence` | 10 | `c` | 1 | 9 |
+| `source_type` | 11 | `st` | 2 | 9 |
+| `created_at` | 10 | `ca` | 2 | 8 |
+| `author_did` | 10 | `adid` | 4 | 6 |
+| `namespace` | 9 | `ns` | 2 | 7 |
+| `importance` | 10 | `im` | 2 | 8 |
+| `structural_tags` | 15 | `tags` | 4 | 11 |
+| **Total** | **100** | | **21** | **79** |
+
+That is a 79-byte reduction in key overhead alone for a single grain with 11 fields. In a store with millions of grains, each averaging 10-15 fields, the cumulative savings are significant — often reducing total key bytes by 70-80%.
+
+<Callout type="info">
+Field compaction savings apply to the key names only. Values (the actual data like "Alice", "ACME Corp", DID strings) are unchanged. For grains with long values and few fields, the percentage savings are modest. For grains with many fields and short values, compaction has outsized impact.
+</Callout>
+
+## Compaction Rules (Section 6.8)
+
+The spec defines four normative rules for how compaction must be applied:
+
+1. **Serializers MUST replace full field names with short keys before encoding.** This is not optional. A compliant serializer always compacts. If it emits `"confidence"` instead of `"c"`, the grain will have a different content address from one that correctly compacts, breaking interoperability.
+
+2. **Deserializers MUST replace short keys with full field names after decoding.** The application layer always works with human-readable names. Compaction is invisible to consumers of the deserialized grain.
+
+3. **Unknown keys MUST be preserved as-is in both directions.** If a serializer encounters a field name that is not in the field map, it writes it unchanged. If a deserializer encounters a short key that is not in the field map, it passes it through unchanged. This enables forward compatibility — a future version of OMS could add new fields, and older implementations will preserve them without error.
+
+4. **The field compaction mapping is normative and MUST NOT be modified by implementations.** You cannot add custom short keys. You cannot change existing mappings. The mapping is part of the specification, and changing it would break interoperability.
+
+<Callout type="warning">
+Rule 3 (preserve unknown keys) is critical for evolution. If a v1.1 spec adds a new field `"priority_override"` with short key `"po"`, a v1.0 deserializer will see `"po"` as an unknown key and pass it through. The grain's content address remains stable because the bytes are preserved exactly.
+</Callout>
+
+## Nested Compaction Boundaries
+
+Field compaction applies at the **top level** of the grain map. But three specific fields also compact the maps nested inside their arrays:
+
+- **`content_refs`** (compacted key: `cr`) — each entry in this array has its keys compacted using the CONTENT_REF_FIELD_MAP: `uri` to `u`, `modality` to `m`, `mime_type` to `mt`, `size_bytes` to `sz`, `checksum` to `ck`, `metadata` to `md`.
+
+- **`embedding_refs`** (compacted key: `er`) — each entry uses the EMBEDDING_REF_FIELD_MAP: `vector_id` to `vi`, `model` to `mo`, `dimensions` to `dm`, `modality_source` to `ms`, `distance_metric` to `di`.
+
+- **`related_to`** (compacted key: `rt`) — each entry uses the RELATED_TO_FIELD_MAP: `hash` to `h`, `relation_type` to `rl`, `weight` to `w`.
+
+Other array-of-maps fields are **NOT** compacted recursively. Specifically:
+
+- `provenance_chain` (compacted key: `pc`) — inner maps retain keys like `source_hash`, `method`, `weight`.
+- `context` (compacted key: `ctx`) — inner key-value pairs retain their original keys.
+- `history` (compacted key: `history`) — inner maps retain their original keys.
+
+This boundary is defined in Section 4.7 (Nested Compaction) of the canonical serialization rules. The distinction matters for content addressing: compacting a `provenance_chain` entry's inner keys would produce different bytes from not compacting them, so implementations must agree on exactly which fields get nested compaction.
+
+Here is what a content reference looks like before and after nested compaction:
+
+**Before nested compaction:**
+
+```json
+{
+  "content_refs": [
+    {
+      "uri": "cas://sha256:abc123...",
+      "modality": "image",
+      "mime_type": "image/jpeg",
+      "size_bytes": 1048576,
+      "checksum": "sha256:abc123..."
+    }
+  ]
+}
+```
+
+**After top-level and nested compaction:**
+
+```json
+{
+  "cr": [
+    {
+      "u": "cas://sha256:abc123...",
+      "m": "image",
+      "mt": "image/jpeg",
+      "sz": 1048576,
+      "ck": "sha256:abc123..."
+    }
+  ]
+}
+```
+
+The top-level key `content_refs` became `cr`, and inside the array entry, `uri` became `u`, `modality` became `m`, and so on.
+
+## Compaction in the Serialization Pipeline
+
+Field compaction is Step 2 of the 10-step canonical serialization algorithm (Section 4.9). Nested compaction is Step 3. Both happen **before** key sorting (Step 7).
+
+This ordering matters. After compaction, the keys that get sorted are the short forms (`c`, `ca`, `cr`, `ns`, `o`, `r`, `s`, `st`, `t`), not the full names. The lexicographic order of short keys differs from the order of full names:
+
+```
+Short key order:  c, ca, cr, ns, o, r, s, st, t
+Full name order:  confidence, content_refs, created_at, namespace, object, relation, source_type, subject, type
+```
+
+If an implementation sorted first and compacted second, the keys would be in the wrong order and the content address would differ. The spec's step ordering prevents this bug.
+
+## Why Not Just Use Short Keys Everywhere?
+
+A natural question: if short keys are more efficient, why not use them as the canonical field names and skip the mapping?
+
+The answer is readability and debuggability. When an engineer is inspecting a grain in a debugging tool, `"subject": "Alice"` is immediately clear. `"s": "Alice"` requires consulting the field map. When writing application code that creates grains, `grain.confidence = 0.95` is self-documenting. `grain.c = 0.95` is cryptic.
+
+The compaction layer lets both worlds coexist. Humans work with full names. The wire format uses short keys. The mapping is mechanical and handled by the serialization library, invisible to application developers.
+
+## Conclusion
+
+Field compaction is one of those specification features that is unglamorous but essential at scale. By replacing human-readable field names with minimal short keys, OMS reduces the per-grain overhead of key encoding by 70-80% without sacrificing readability at the application layer.
+
+The rules are strict — serializers MUST compact, deserializers MUST expand, unknown keys MUST be preserved, and the mapping MUST NOT be modified. These constraints ensure that every compliant implementation produces identical bytes for the same grain, maintaining the deterministic serialization guarantee that underpins content addressing.
+
+Combined with the canonical serialization rules (Section 4) and the nested compaction boundaries (Sections 4.7, 7.1, 7.2, 14.2), field compaction completes the picture of how OMS transforms a human-friendly data structure into a compact, deterministic, content-addressable binary blob.

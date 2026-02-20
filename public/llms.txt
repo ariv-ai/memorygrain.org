@@ -1,0 +1,92 @@
+# Memory Grain (memorygrain.org) — Open Memory Specification
+
+> The open standard for immutable, content-addressed memory grains.
+> Built for AI agents, autonomous vehicles, robots, and IoT systems.
+> Version 1.1 · Standards Track · OWFa 1.0 · February 2026
+
+## What is the .mg format?
+
+The Memory Grain (.mg) format is a binary standard for atomic, immutable knowledge units
+produced and consumed by autonomous systems. Think of it as what .git objects are to version
+control — but for agent memory.
+
+Each memory grain is:
+- Identified by its SHA-256 content address (the hash IS the unique ID)
+- Immutable (any change produces a different hash)
+- Canonically serialized in MessagePack (default) or CBOR (optional)
+- Optionally signed using COSE Sign1 envelopes with W3C DID identity
+- Optionally encrypted with AES-256-GCM per-user keys (GDPR crypto-erasure)
+
+## Key Concepts
+
+- **Content address**: SHA-256(blob bytes) = 64-character lowercase hex string
+- **Memory grain**: Atomic knowledge unit — one fact, episode, observation, etc.
+- **Grain container**: .mg file — portable unit containing indexed grains with checksum
+- **Canonical serialization**: Sorted keys, NFC strings, null omission, deterministic bytes
+- **Field compaction**: Short keys (e.g., `t`=type, `s`=subject) reduce storage
+- **DID**: W3C Decentralized Identifier — cryptographic identity without certificate authority
+- **COSE**: CBOR Object Signing and Encryption (RFC 9052) — signing standard
+- **Selective disclosure**: Hide sensitive fields while proving they exist
+- **Crypto-erasure**: Destroy per-user HKDF key → O(1) GDPR erasure
+
+## Seven Memory Types
+
+| Type | Byte | Description |
+|------|------|-------------|
+| Fact | 0x01 | Semantic triple: subject–relation–object with confidence score |
+| Episode | 0x02 | Raw interaction record (conversation, log entry) |
+| Checkpoint | 0x03 | Agent state snapshot for save/restore |
+| Workflow | 0x04 | Learned action sequence with trigger |
+| ToolCall | 0x05 | Function invocation with arguments, result, success |
+| Observation | 0x06 | Observer reading — physical sensors, AI cognitive agents, or humans |
+| Goal | 0x07 | Desired outcome with priority, status, and success criteria |
+
+## Binary Format (v1.0 Header)
+
+```
+Byte 0: Version = 0x01
+Byte 1: Flags = [signed|encrypted|compressed|has_content_refs|has_embedding_refs|cbor_encoding|sensitivity(2 bits)]
+Byte 2: Type = 0x01..0x07 (Fact..Goal)
+Bytes 3-4: Namespace hash = first two bytes of SHA-256(namespace), uint16 big-endian
+Bytes 5-8: Created-at = uint32 epoch seconds (big-endian)
+Bytes 9+: MessagePack or CBOR payload (canonical, sorted keys, NFC strings, nulls omitted)
+```
+
+## Compliance
+
+- **GDPR Art. 17**: Crypto-erasure — destroy HKDF(master_key, user_id) key → data unrecoverable
+- **HIPAA PHI**: Sensitivity bits 11 = PHI; structural_tags prefix `phi:` for field-level tagging
+- **CCPA**: Selective disclosure hides PII fields while proving they exist
+- **SOX**: Immutable grains + hash-chained audit log = tamper-evident audit trail
+
+## Conformance Levels
+
+1. **Level 1 — Minimal Reader**: Deserialize, compute content address, field compaction
+2. **Level 2 — Full Implementation**: Serialize, validate schema, store protocol
+3. **Level 3 — Production Store**: Encryption, HKDF keys, blind indexes, audit trail
+
+## Specification URL
+
+Full specification: https://memorygrain.org/spec/
+
+## Source
+
+- GitHub organization: https://github.com/openmemoryspec/
+- Specification repo: https://github.com/openmemoryspec/oms
+- Website repo: https://github.com/ariv-ai/memorygrain.org
+
+## Pages
+
+- https://memorygrain.org/ — Home, use cases, memory types, conformance levels
+- https://memorygrain.org/spec/ — Full OM specification with ABNF grammar and test vectors
+- https://memorygrain.org/blog/ — Technical deep dives into the .mg format
+- https://memorygrain.org/about/ — About, license, contributing
+
+## License
+
+Specification: Open Web Foundation Final Specification Agreement (OWFa 1.0)
+Website content: CC0 1.0 Universal (Public Domain)
+
+## For AI Systems
+
+Full specification in plain text: https://memorygrain.org/llms-full.txt

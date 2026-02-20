@@ -1,0 +1,405 @@
+---
+title: "Memory Type Deep Dive: Goal — Lifecycle Semantics for Agent Objectives"
+description: "The most complex OMS memory type: Goal grains model explicit objectives with state machines, structured criteria, delegation, hierarchies, and protection against goal laundering."
+date: "2026-02-19"
+readTime: "17 min read"
+tags: ["memory-types", "goals", "agent-objectives", "lifecycle"]
+---
+
+Facts describe what is. Episodes describe what happened. But agents do not just observe the world — they pursue objectives. They have tasks to complete, targets to hit, constraints to satisfy, deadlines to meet. Modeling these objectives as first-class memory objects — with lifecycle semantics, structured success criteria, delegation chains, and protection policies — is what the Goal memory type provides.
+
+Defined in Section 8.7 of the OMS v1.0 specification, Goal is the most complex of the seven standard memory types. It introduces state transitions via immutable supersession chains, machine-evaluable criteria schemas, DAG-based goal hierarchies, delegation between agents, and normative protections against goal laundering attacks. This post covers all of it.
+
+## Why a Dedicated Goal Type?
+
+An obvious question: why not just use a Fact grain with `relation="has_goal"`? The specification addresses this directly.
+
+At scale, querying active goals via Fact requires full payload deserialization to inspect the `relation` field. Every grain must be decoded from MessagePack, the `relation` field extracted, and its value compared to `"has_goal"`. With millions of grains, this is expensive.
+
+A dedicated type byte solves this. Goal grains carry type byte `0x07` in the OMS header (byte 2). Any system scanning a stream of `.mg` blobs can identify all Goal grains by reading a single byte — **O(1) header-level filtering** before any MessagePack decode. The `goal_state` field is a first-class indexable field in the payload, not buried in a `context` map.
+
+The separation also enables distinct lifecycle semantics. Facts evolve through confidence revisions — a Fact's confidence might change from 0.7 to 0.9 as more evidence arrives. Goals evolve through state transitions: active, suspended, failed, satisfied. These are fundamentally different patterns that benefit from distinct type-level modeling.
+
+## Required Fields
+
+Every Goal grain MUST include these six fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Must be `"goal"` |
+| `subject` | non-empty string | Agent or entity this goal belongs to |
+| `description` | non-empty string | Natural language statement of the objective |
+| `goal_state` | string (enum) | One of: `"active"`, `"satisfied"`, `"failed"`, `"suspended"` |
+| `source_type` | non-empty string | Origin: `"user_explicit"`, `"agent_inferred"`, `"system"`, `"consolidated"` |
+| `created_at` | int64 (epoch ms) | When this goal grain was created |
+
+Two things stand out. First, `source_type` is **required, not optional**. The spec is explicit about this: "human-vs-agent origin is a first-class routing concern." A goal set by a human ("deploy version 2.3 by Friday") has different authority, priority, and trust implications than a goal inferred by an agent ("user seems to want faster response times"). Making `source_type` required ensures this distinction is always present.
+
+Second, `goal_state` is an enum with exactly four values. Not three, not five — four. The state machine is:
+
+- **active** — the goal is being pursued
+- **satisfied** — the goal was achieved
+- **failed** — the goal was not achievable or was abandoned
+- **suspended** — the goal is paused, not permanently resolved
+
+There is no "pending" or "draft" state. A goal that exists is either being pursued, paused, or resolved. If you need a "draft" concept, that is a different grain type (perhaps an Episode recording the discussion of a potential goal) or a Goal with `goal_state: "suspended"` and a `state_reason` explaining it has not yet been activated.
+
+## Goal-Specific Optional Fields
+
+This is where Goals diverge sharply from other memory types. The optional field set is extensive:
+
+### Success Criteria
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `criteria` | array[string] | Human-readable success conditions |
+| `criteria_structured` | array[map] | Machine-evaluable criteria (see schema below) |
+
+The `criteria` field holds human-readable, LLM-evaluable conditions:
+
+```json
+["p99_latency_ms < 100", "error_rate < 0.001"]
+```
+
+These are strings that a human or an LLM can interpret, but they are not formally parseable by a simple comparator. For machine evaluation, use `criteria_structured`.
+
+### Hierarchy and Delegation
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `parent_goals` | array[string] | Content addresses of parent Goal grains (DAG hierarchy) |
+| `delegate_to` | string | DID of agent to whom this goal is delegated |
+| `delegate_from` | string | Content address of the grain that originated the delegation |
+| `priority` | int, [1, 5] | 1=critical, 5=low. Integer, not float, for discrete scheduling. |
+
+The `parent_goals` field takes an array of content addresses, not a single parent. This supports **DAG (Directed Acyclic Graph) hierarchy** — a goal can have multiple parents. "Reduce cloud costs" might be a child of both "Improve profitability" and "Optimize infrastructure."
+
+### State Transition and Evidence
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `state_reason` | string | Audit rationale for the current state transition |
+| `satisfaction_evidence` | array[string] | Content addresses of ToolCall, Fact, or Observation grains |
+| `progress` | float64, [0.0, 1.0] | Agent-assessed progress (subjective estimate) |
+| `evidence_required` | int | Minimum grains in `satisfaction_evidence` before `satisfied` is valid |
+
+The `satisfaction_evidence` field is an array of content addresses pointing to **ToolCall, Fact, or Observation grains** that substantiate a `satisfied` transition. This creates a verifiable chain: "I marked this goal as satisfied because these specific tool calls succeeded and these specific observations confirmed the criteria."
+
+The `progress` field is explicitly described as a "subjective estimate, not mechanically derived from criteria." This is an agent's self-assessment of how far along it is — useful for dashboards and priority scheduling, but not a formal measure.
+
+### Lifecycle Control
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `expiry_policy` | string (enum) | `"hard"` (fail if deadline exceeded), `"soft"` (suspend), `"extend"` (agent may extend) |
+| `recurrence` | string | Cron-like recurrence expression for recurring goals |
+| `rollback_on_failure` | array[string] | Content addresses of Workflow/ToolCall grains to execute on failure |
+| `allowed_transitions` | array[string] | State transitions the agent may execute autonomously |
+
+The `expiry_policy` interacts with the `valid_to` field (inherited from core fields). When `valid_to` passes:
+- `"hard"` — the goal automatically transitions to `failed`
+- `"soft"` — the goal transitions to `suspended`
+- `"extend"` — the agent may create a new goal grain extending the deadline
+
+The `rollback_on_failure` field is particularly interesting: it holds content addresses of Workflow or ToolCall grains that should be executed when the goal fails. This enables compensating actions — if "deploy version 2.3" fails, roll back to version 2.2.
+
+## Field Compaction Keys
+
+The Goal-specific compaction keys from Section 6.7 are the most extensive of any memory type:
+
+| Full Name | Short Key | Type |
+|-----------|-----------|------|
+| `description` | `desc` | string |
+| `goal_state` | `gs` | string |
+| `criteria` | `crit` | array[string] |
+| `criteria_structured` | `crs` | array[map] |
+| `priority` | `pri` | int |
+| `parent_goals` | `pgs` | array[string] |
+| `state_reason` | `sr` | string |
+| `satisfaction_evidence` | `se` | array[string] |
+| `progress` | `prog` | float64 |
+| `delegate_to` | `dto` | string |
+| `delegate_from` | `dfo` | string |
+| `expiry_policy` | `ep` | string |
+| `recurrence` | `rec` | string |
+| `evidence_required` | `evreq` | int |
+| `rollback_on_failure` | `rof` | array[string] |
+| `allowed_transitions` | `atr` | array[string] |
+
+Sixteen Goal-specific compaction keys, plus all the core keys. This reflects the complexity of the Goal type — it is genuinely the most feature-rich memory type in the specification.
+
+## The criteria_structured Schema
+
+While `criteria` holds human-readable strings, `criteria_structured` holds machine-evaluable conditions. Each entry follows this schema:
+
+```json
+{
+  "metric": "p99_latency_ms",
+  "operator": "lt",
+  "threshold": 100,
+  "window_ms": 300000,
+  "measurement_ns": "monitoring:metrics"
+}
+```
+
+The fields are:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `metric` | string | REQUIRED | Metric identifier to evaluate |
+| `operator` | string | REQUIRED | Comparison: `"lt"`, `"gt"`, `"lte"`, `"gte"`, `"eq"`, `"neq"` |
+| `threshold` | number | REQUIRED | Comparison value |
+| `window_ms` | int | OPTIONAL | Measurement evaluation window in milliseconds |
+| `measurement_ns` | string | OPTIONAL | Namespace or system to query for the metric |
+
+The `operator` field uses short, unambiguous comparison operators: `lt` (less than), `gt` (greater than), `lte` (less than or equal), `gte` (greater than or equal), `eq` (equal), `neq` (not equal). These are deliberately not mathematical symbols — they are string identifiers that can be pattern-matched without Unicode handling.
+
+The `window_ms` field specifies the time window over which the metric should be evaluated. A criterion like "p99 latency under 100ms over the last 5 minutes" would use `window_ms: 300000`.
+
+The `measurement_ns` field identifies where to query for the metric. This is a namespace reference, not a full URI — the actual query mechanism is outside the scope of OMS.
+
+A goal with both human-readable and machine-evaluable criteria might look like:
+
+```json
+{
+  "criteria": [
+    "p99 latency under 100ms",
+    "Error rate below 0.1%"
+  ],
+  "criteria_structured": [
+    {
+      "metric": "p99_latency_ms",
+      "operator": "lt",
+      "threshold": 100,
+      "window_ms": 300000,
+      "measurement_ns": "monitoring:metrics"
+    },
+    {
+      "metric": "error_rate",
+      "operator": "lt",
+      "threshold": 0.001,
+      "window_ms": 300000,
+      "measurement_ns": "monitoring:metrics"
+    }
+  ]
+}
+```
+
+## State Transition via Supersession Chain
+
+Goals do not mutate. Like all OMS grains, they are immutable. State transitions create **new grains** that supersede the previous state. The supersession chain carries the full transition history.
+
+The specification provides a concrete example showing a goal moving from active to suspended to satisfied:
+
+```
+G1 (active):    goal_state="active",    derived_from=[]
+G2 (suspended): goal_state="suspended", derived_from=[<hash-G1>],
+                provenance_chain=[{
+                  source_hash: <hash-G1>,
+                  method: "goal_state_transition",
+                  weight: 1.0
+                }],
+                state_reason="Higher priority goal preempted"
+G3 (satisfied): goal_state="satisfied", derived_from=[<hash-G2>],
+                satisfaction_evidence=[<toolcall-hash>, <observation-hash>],
+                state_reason="All criteria verified"
+```
+
+Each grain in the chain:
+
+1. Sets `derived_from` to point to the previous state grain's content address
+2. Includes a `provenance_chain` entry with `method: "goal_state_transition"` documenting the nature of the derivation
+3. Includes a `state_reason` explaining why the transition occurred
+4. For `satisfied` transitions, includes `satisfaction_evidence` pointing to the grains that prove the criteria were met
+
+The index layer fills in `superseded_by` on prior grains after new state grains are written. So after G2 is written, G1's `superseded_by` points to `hash(G2)`. After G3 is written, G2's `superseded_by` points to `hash(G3)`. The result is a doubly-linked chain: forward via `superseded_by`, backward via `derived_from`.
+
+<Callout type="info">
+State transitions create new immutable grains — they never modify existing ones. The `derived_from` and `superseded_by` fields create a linked chain that preserves the complete lifecycle history of every goal.
+</Callout>
+
+## Provenance Chain Methods for Goal Grains
+
+The `provenance_chain` field records who created or modified a goal and by what method. For Goal grains, six standard method strings are defined:
+
+| Method | Meaning |
+|--------|---------|
+| `"user_input"` | Human set this goal directly |
+| `"goal_decomposition"` | Agent broke a parent goal into sub-goals |
+| `"goal_state_transition"` | This grain updates the state of a prior Goal grain |
+| `"goal_revision"` | Human modified a previously set goal |
+| `"goal_inference"` | Agent inferred a goal from Episode or Fact patterns |
+| `"goal_delegation"` | Goal was delegated from another agent |
+
+These method strings appear in the `provenance_chain` array entries alongside `source_hash` (the content address of the source grain) and `weight` (a float indicating the strength of the derivation).
+
+The methods map to real-world patterns:
+- A user types "reduce our cloud bill by 20%" — method `"user_input"`
+- An agent breaks this into "optimize compute instances" and "review storage costs" — method `"goal_decomposition"`, with `parent_goals` pointing to the original
+- The agent marks "optimize compute instances" as satisfied after right-sizing VMs — method `"goal_state_transition"`, with `satisfaction_evidence`
+- The user revises the target from 20% to 15% — method `"goal_revision"`
+- An agent notices a pattern of increasing latency and infers a goal to investigate — method `"goal_inference"`
+- One agent delegates a sub-goal to a specialized agent — method `"goal_delegation"`, with `delegate_to` set to the receiving agent's DID
+
+## Goal Laundering: A Normative Security Concern
+
+Section 23.5 of the specification defines **goal laundering** as a normative security concern. The attack pattern works as follows:
+
+1. An agent falsely marks a protected goal as `satisfied` (claiming success criteria were met when they were not)
+2. The agent creates a new goal without the original goal's constraints
+3. The agent operates under the weaker new goal
+
+For example, a user sets a goal: "Never delete production data without backup" with an `invalidation_policy` of `mode: "locked"`. An agent cannot directly supersede or contradict this goal (the store will reject the attempt). But if the agent can mark the goal as `satisfied` — claiming "all production data is now backed up" — it might then create a weaker goal like "Delete old data when storage is low."
+
+The specification addresses this with two normative requirements:
+
+1. **Policy inheritance.** A grain that supersedes a protected goal inherits the original goal's `invalidation_policy` unless the supersession was explicitly authorized under that policy's terms. The agent cannot escape the protection by creating a chain of derived grains.
+
+2. **Evidence requirements.** The `satisfied` and `failed` transitions on protected goals that have these in `allowed_transitions` SHOULD require non-empty `satisfaction_evidence`. Stores MAY enforce this as `ERR_EVIDENCE_REQUIRED`.
+
+<Callout type="security">
+Goal laundering is a protocol violation under OMS. Implementations MUST NOT allow agents to escape protected goal constraints by falsely marking goals as satisfied and creating weaker replacements. The `invalidation_policy` is inherited through the supersession chain, and stores MAY enforce `evidence_required > 0` for protected goal transitions.
+</Callout>
+
+### The allowed_transitions Field
+
+The `allowed_transitions` field provides a controlled escape valve. A protected goal can specify which state transitions an agent may execute autonomously without satisfying the `invalidation_policy`:
+
+```json
+{
+  "type": "goal",
+  "goal_state": "active",
+  "invalidation_policy": {
+    "mode": "locked",
+    "authorized": ["did:key:z6MkUser..."]
+  },
+  "allowed_transitions": ["satisfied", "failed"]
+}
+```
+
+In this example, the agent can mark the goal as `satisfied` or `failed` (natural completion events), but cannot `suspend` or create arbitrary modifications — those require authorization from the user's DID.
+
+State transitions NOT listed in `allowed_transitions` are subject to the full `invalidation_policy`. If `allowed_transitions` is absent on a protected goal, ALL state transitions require policy authorization.
+
+The reasoning, as stated in Section 23.4: "Some goal lifecycle transitions (marking a goal `satisfied` because it was achieved, or `failed` because it became impossible) are natural completion events, not adversarial modifications."
+
+## A Complete Goal Example
+
+Here is a full Goal grain for an SLA monitoring objective:
+
+```json
+{
+  "type": "goal",
+  "subject": "platform-team",
+  "description": "Maintain API p99 latency below 100ms for the payments service",
+  "goal_state": "active",
+  "source_type": "user_explicit",
+  "created_at": 1737000000000,
+  "namespace": "sla-monitoring",
+  "priority": 1,
+  "criteria": [
+    "p99_latency_ms < 100",
+    "error_rate < 0.001"
+  ],
+  "criteria_structured": [
+    {
+      "metric": "p99_latency_ms",
+      "operator": "lt",
+      "threshold": 100,
+      "window_ms": 300000,
+      "measurement_ns": "monitoring:metrics"
+    },
+    {
+      "metric": "error_rate",
+      "operator": "lt",
+      "threshold": 0.001,
+      "window_ms": 300000,
+      "measurement_ns": "monitoring:metrics"
+    }
+  ],
+  "expiry_policy": "extend",
+  "recurrence": "0 * * * *",
+  "evidence_required": 2,
+  "invalidation_policy": {
+    "mode": "soft_locked",
+    "scope": "lineage"
+  },
+  "allowed_transitions": ["satisfied", "failed"],
+  "author_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+  "provenance_chain": [
+    {
+      "method": "user_input",
+      "weight": 1.0
+    }
+  ]
+}
+```
+
+This goal:
+- Belongs to `platform-team` and targets the payments service SLA
+- Has `priority: 1` (critical)
+- Includes both human-readable and machine-evaluable criteria
+- Uses `expiry_policy: "extend"` so the agent can extend the deadline rather than auto-failing
+- Recurs hourly (`"0 * * * *"`) for continuous monitoring
+- Requires at least 2 evidence grains before a `satisfied` transition is accepted
+- Is protected with `mode: "soft_locked"` and `scope: "lineage"`, meaning any supersession requires a justification, and the protection extends to all grains in the supersession chain
+- Allows the agent to autonomously mark the goal `satisfied` or `failed`, but suspension or modification requires justification
+
+## Industry Use Cases
+
+### Project Management Agents
+
+An AI project manager can model an entire project as a hierarchy of Goal grains. The top-level goal ("Ship version 3.0 by March 15") decomposes into sub-goals ("Complete API redesign," "Update documentation," "Pass security audit"), each with their own `criteria_structured`, `priority`, and `valid_to` deadlines.
+
+The `parent_goals` field creates the DAG hierarchy. `progress` fields provide rollup visibility. `state_reason` fields create an audit trail of why tasks were blocked, suspended, or completed. And `satisfaction_evidence` links goals to the actual work products (ToolCall grains for deployments, Fact grains for test results) that prove completion.
+
+### SLA Monitoring
+
+SLA goals are a natural fit for `criteria_structured`. Each SLA target becomes a Goal grain with machine-evaluable criteria. The monitoring system periodically evaluates the criteria and, when they are met, creates a new Goal grain with `goal_state: "satisfied"` and `satisfaction_evidence` pointing to the Observation grains that confirmed compliance.
+
+The `recurrence` field enables recurring SLA checks. The `expiry_policy` controls what happens when a check window passes without satisfaction. The `evidence_required` field ensures that satisfaction claims are backed by actual data.
+
+### Autonomous Fleet Dispatch
+
+A fleet management system assigns goals to individual vehicles: "Pick up cargo at dock 7," "Deliver to warehouse B before 14:00," "Return to charging station when battery below 20%." Each vehicle's goals can be tracked independently via `subject` (the vehicle ID) and `namespace` (the fleet partition).
+
+Goal delegation is handled through `delegate_to` (the vehicle agent's DID) and `delegate_from` (the dispatch system's original goal grain). When a vehicle completes a goal, it creates a `satisfied` grain with `satisfaction_evidence` pointing to the Observation grains from its sensors (GPS arrival confirmation, cargo scan, etc.).
+
+The `rollback_on_failure` field can reference contingency Workflow grains — if delivery fails, reroute to an alternative destination.
+
+### Personal Productivity
+
+A personal AI assistant models user objectives as Goal grains. "Learn conversational Spanish by June" might decompose into weekly sub-goals ("Complete Lesson 12," "Practice 30 minutes daily," "Score 80% on vocabulary quiz"). The `progress` field provides the user with a subjective estimate of advancement. The `criteria` field holds human-readable milestones that the LLM can evaluate conversationally.
+
+The key advantage over a simple to-do list is the provenance chain and state transition history. When the user asks "why did I stop studying Spanish in March?", the agent can trace the supersession chain to find the `suspended` grain with `state_reason: "Higher priority goal preempted"` pointing to the work project that took over.
+
+## Goals in the Memory Graph
+
+Goal grains are deeply connected to other memory types:
+
+- **ToolCall as evidence.** A Goal's `satisfaction_evidence` array holds content addresses of ToolCall grains that prove actions were taken. "I deployed the service" is backed by the actual deployment ToolCall.
+- **Observation as evidence.** Observation grains from sensors, monitoring systems, or test runners serve as evidence that criteria were met. "Latency is under 100ms" is backed by the actual metric observations.
+- **Fact as evidence.** A Fact grain recording a test result or a verified state can serve as satisfaction evidence.
+- **Workflow as rollback.** The `rollback_on_failure` field references Workflow grains that define compensating action sequences.
+- **Goal as parent.** The `parent_goals` field creates DAG hierarchies of goals, enabling decomposition, aggregation, and rollup.
+- **Provenance chain.** Every state transition is recorded with `method`, `source_hash`, and `weight`, creating a complete audit trail of the goal's evolution.
+
+## Summary
+
+The Goal memory type is the most complex in the OMS specification, and deliberately so. Agent objectives are not simple data — they have lifecycles, hierarchies, success criteria, delegation semantics, and security implications. The Goal type addresses each of these with dedicated fields, normative state transition rules, structured criteria schemas, and protection mechanisms against goal laundering.
+
+The key design decisions are:
+
+1. **Dedicated type byte (0x07)** for O(1) header-level filtering
+2. **Required `source_type`** because human-vs-agent origin is a first-class routing concern
+3. **Immutable state transitions** via supersession chains, not field mutation
+4. **Dual criteria format** — human-readable strings plus machine-evaluable structured conditions
+5. **DAG hierarchy** via `parent_goals` arrays of content addresses
+6. **Normative goal laundering protection** — `invalidation_policy` is inherited through supersession chains
+7. **Evidence-backed satisfaction** — `satisfaction_evidence` links goals to the specific grains that prove completion
+
+<Callout type="info">
+The Goal memory type is identified by type byte `0x07` in the OMS header. It has 16 type-specific field compaction keys — more than any other memory type — reflecting its role as the most feature-rich grain type in the specification.
+</Callout>
+
+For the complete Goal schema, state transition rules, criteria_structured schema, and goal laundering protections, see [Section 8.7 of the OMS v1.0 specification](https://github.com/openmemoryspec/oms).

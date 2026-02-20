@@ -1,0 +1,355 @@
+---
+title: "OMS for Healthcare: HIPAA-Compliant Agent Memory for Patient Data"
+description: "How the Open Memory Specification maps to healthcare AI — from patient observations and diagnoses to treatment plans, with PHI protection, HIPAA compliance mapping, per-patient encryption, selective disclosure, and bi-temporal queries for clinical audit."
+date: "2026-02-19"
+readTime: "14 min read"
+tags: ["healthcare", "hipaa", "phi", "compliance", "industry"]
+---
+
+Healthcare AI agents handle some of the most sensitive data that exists. A clinical decision support agent might track a patient's vitals across dozens of encounters, store diagnoses with confidence scores, record treatment plans with recovery targets, and log every lab order and prescription API call it triggers. That data flows between providers, insurers, and specialists — each with different access rights, each governed by regulations that carry criminal penalties for violations.
+
+The challenge is not just storing this data. It is storing it in a format that is portable across providers, auditable under HIPAA, cryptographically verifiable, and structured enough for machines to reason over — while simultaneously protecting patient privacy at the field level. Most healthcare AI systems today solve this with proprietary data models locked inside a single EHR vendor, making true interoperability an aspiration rather than a reality.
+
+The Open Memory Specification provides a standards-based approach. Every piece of clinical knowledge — a vital reading, a diagnosis, a treatment goal, a lab order — becomes an immutable, content-addressed memory grain with built-in compliance primitives. This post maps OMS to healthcare workflows, showing how each memory type serves a specific clinical function, how PHI protection works at the binary level, and how HIPAA's technical safeguard requirements align with OMS capabilities.
+
+## The seven memory types in clinical context
+
+OMS defines seven memory types (Section 8), each with a type byte in the 9-byte fixed header that enables O(1) filtering without payload deserialization. In a healthcare system, every type has a natural clinical role.
+
+### Observations for vitals and sensor data
+
+The Observation type (type byte `0x06`) is built for high-volume sensor readings. In healthcare, this maps directly to vital signs and monitoring data.
+
+A blood pressure reading becomes an Observation grain:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "bp-monitor-room-412",
+  "observer_type": "blood_pressure",
+  "subject": "patient-456",
+  "object": "120/80 mmHg",
+  "confidence": 0.98,
+  "created_at": 1739900000000,
+  "namespace": "cardiology:vitals",
+  "structural_tags": ["phi:lab_result"]
+}
+```
+
+The `observer_type` field accommodates any clinical measurement — `"heart_rate"`, `"temperature"`, `"blood_pressure"`, `"pulse_oximetry"`. For imaging studies, the grain itself stays small while the content reference points to the actual scan:
+
+```json
+{
+  "type": "observation",
+  "observer_id": "ct-scanner-bay-3",
+  "observer_type": "camera",
+  "subject": "patient-456",
+  "object": "Chest CT - no acute findings",
+  "confidence": 0.85,
+  "created_at": 1739900000000,
+  "namespace": "radiology:imaging",
+  "structural_tags": ["phi:lab_result"],
+  "content_refs": [
+    {
+      "uri": "cas://sha256:f4a3b2c1d0...",
+      "modality": "image",
+      "mime_type": "application/dicom",
+      "size_bytes": 52428800,
+      "checksum": "sha256:f4a3b2c1d0...",
+      "metadata": {"width": 512, "height": 512, "color_space": "grayscale"}
+    }
+  ]
+}
+```
+
+The content reference schema (Section 7.1) keeps the grain compact — the 50 MB DICOM image is referenced by URI and integrity-checked via its SHA-256 checksum, never embedded in the grain itself. This follows OMS Design Principle 1: "References, not blobs."
+
+### Facts for diagnoses and clinical knowledge
+
+The Fact type (type byte `0x01`) models structured knowledge as semantic triples. Clinical diagnoses map naturally:
+
+```json
+{
+  "type": "fact",
+  "subject": "patient-456",
+  "relation": "diagnosed_with",
+  "object": "Type 2 Diabetes Mellitus",
+  "confidence": 0.92,
+  "source_type": "llm_generated",
+  "created_at": 1739900000000,
+  "valid_from": 1739900000000,
+  "namespace": "endocrinology",
+  "user_id": "patient-456",
+  "structural_tags": ["phi:diagnosis"],
+  "provenance_chain": [
+    {"source_hash": "abc123...", "method": "clinical_assessment", "weight": 0.7},
+    {"source_hash": "def456...", "method": "lab_correlation", "weight": 0.3}
+  ]
+}
+```
+
+The `confidence` field is critical in clinical contexts. A diagnosis confirmed by biopsy might carry `confidence: 0.99` with `source_type: "user_explicit"` (the clinician confirmed it). A differential diagnosis suggested by an AI agent analyzing symptoms and lab results would use `source_type: "llm_generated"` with a lower confidence score. The `provenance_chain` traces exactly which evidence — which Observation grains, which Episode transcripts — contributed to this diagnosis.
+
+Drug allergies, family history, and medication records all follow the same pattern: `subject="patient-456"`, `relation="allergic_to"`, `object="Penicillin"`, with appropriate confidence and source type.
+
+### Episodes for clinical encounters
+
+Episode grains (type byte `0x02`) store raw, unstructured text — perfect for clinical notes and consultation transcripts:
+
+```json
+{
+  "type": "episode",
+  "content": "Patient presents with persistent cough for 3 weeks. No fever. Non-smoker. Chest X-ray clear. Prescribed short course of codeine-based cough suppressant. Follow-up in 2 weeks if symptoms persist.",
+  "created_at": 1739900000000,
+  "user_id": "patient-456",
+  "namespace": "primary-care:encounters",
+  "structural_tags": ["phi:diagnosis", "phi:medication"],
+  "importance": 0.7
+}
+```
+
+Episodes are the input to consolidation — the process of extracting structured Facts from unstructured text. A clinical AI agent might process this Episode and generate Fact grains: `(patient-456, has_symptom, persistent_cough)`, `(patient-456, prescribed, codeine_cough_suppressant)`. The extracted Facts would carry `source_type: "llm_generated"` and reference the Episode in their `derived_from` field.
+
+### Goals for treatment plans
+
+The Goal type (type byte `0x07`) has lifecycle semantics that map directly to treatment plan management. A recovery target becomes a Goal grain:
+
+```json
+{
+  "type": "goal",
+  "subject": "patient-456",
+  "description": "Achieve HbA1c below 7.0% within 6 months",
+  "goal_state": "active",
+  "source_type": "user_explicit",
+  "created_at": 1739900000000,
+  "valid_from": 1739900000000,
+  "valid_to": 1755452000000,
+  "priority": 2,
+  "criteria": ["HbA1c < 7.0%", "Fasting glucose < 130 mg/dL"],
+  "criteria_structured": [
+    {
+      "metric": "hba1c_percent",
+      "operator": "lt",
+      "threshold": 7.0,
+      "window_ms": 15778800000,
+      "measurement_ns": "endocrinology:labs"
+    }
+  ],
+  "namespace": "endocrinology:treatment",
+  "structural_tags": ["phi:diagnosis"],
+  "allowed_transitions": ["satisfied", "failed", "suspended"]
+}
+```
+
+Goal state transitions — `active` to `satisfied`, `active` to `failed`, `active` to `suspended` — each create a new immutable grain in the supersession chain (Section 8.7). When the patient achieves target HbA1c, the agent creates a new Goal grain with `goal_state: "satisfied"` and `satisfaction_evidence` pointing to the Observation grains with the lab results that prove it. The `priority` field (integer 1-5, where 1 is critical) maps to treatment urgency.
+
+### ToolCalls for lab orders and prescriptions
+
+Every interaction with external clinical systems — lab order submissions, prescription fills, EHR API queries — becomes a ToolCall grain (type byte `0x05`):
+
+```json
+{
+  "type": "tool_call",
+  "tool_name": "lab_order_api",
+  "arguments": {
+    "patient_id": "patient-456",
+    "test": "HbA1c",
+    "priority": "routine",
+    "ordering_provider": "dr-smith-789"
+  },
+  "result": {
+    "order_id": "LAB-2026-78901",
+    "status": "submitted",
+    "estimated_completion": "2026-02-21T14:00:00Z"
+  },
+  "success": true,
+  "duration_ms": 340,
+  "created_at": 1739900000000,
+  "namespace": "endocrinology:orders",
+  "structural_tags": ["phi:lab_result"]
+}
+```
+
+The `duration_ms` field tracks API response times — useful for monitoring EHR integration performance. The `success` boolean and optional `error` field create an automatic record when orders fail, enabling systematic analysis of integration failures.
+
+### Checkpoints for care plan state
+
+Checkpoint grains (type byte `0x03`) capture the complete state of a care plan at a point in time:
+
+```json
+{
+  "type": "checkpoint",
+  "context": {
+    "active_diagnoses": "type_2_diabetes,hypertension",
+    "current_medications": "metformin_500mg_bid,lisinopril_10mg_daily",
+    "next_appointment": "2026-03-15",
+    "care_team": "dr-smith,nurse-johnson",
+    "last_hba1c": "7.8%"
+  },
+  "plan": ["Order follow-up HbA1c in 3 months", "Schedule nutrition counseling"],
+  "created_at": 1739900000000,
+  "user_id": "patient-456",
+  "structural_tags": ["phi:diagnosis", "phi:medication"]
+}
+```
+
+If an agent crashes mid-workflow or a patient transfers to a new provider, the Checkpoint enables full state recovery.
+
+## PHI protection at the binary level
+
+Protected health information requires the highest sensitivity classification in OMS. The 9-byte fixed header encodes this in two bits.
+
+### Sensitivity bits
+
+Byte 1 of the fixed header contains the sensitivity field in bits 6-7 (Section 13.1):
+
+| Value | Level | Healthcare meaning |
+|-------|-------|--------------------|
+| `00` | Public | Clinical guidelines, drug reference data |
+| `01` | Internal | De-identified research data, aggregate statistics |
+| `10` | PII | Patient demographics without clinical data |
+| `11` | PHI | Any grain containing protected health information |
+
+For PHI-containing grains, the sensitivity bits are `11`. This enables O(1) routing decisions — a system scanning `.mg` blobs can route PHI grains to encrypted storage and apply access controls without deserializing a single byte of payload.
+
+<Callout type="security">
+The spec is explicit (Section 13.3): header sensitivity bits are advisory routing metadata, not a compliance guarantee. Systems processing PHI SHOULD treat them as a fast-path routing hint and perform payload inspection of `structural_tags` before making sharing or access decisions.
+</Callout>
+
+### Structural tags for PHI classification
+
+The `structural_tags` field provides granular PHI classification using the `phi:` prefix vocabulary defined in Section 13.2:
+
+- `phi:diagnosis` — diagnostic information
+- `phi:medication` — prescription and medication data
+- `phi:lab_result` — laboratory test results
+
+At write time, the serializer scans `structural_tags` and sets the header sensitivity bits to the highest classification present. If any `phi:*` tag is found, the bits are set to `11` (PHI). The parser validates consistency on read — if tags require a higher classification than the header bits indicate, it rejects with `ERR_SENSITIVITY_MISMATCH` (Section 13.4).
+
+## HIPAA compliance mapping
+
+Appendix C of the OMS specification provides a direct mapping between HIPAA requirements and OMS capabilities. Let us examine the two most relevant sections.
+
+### 45 CFR Section 164.308: Administrative safeguards
+
+HIPAA's administrative safeguards require covered entities to implement procedures to regularly review records of information system activity, including audit logs, access reports, and security incident tracking. OMS supports this through the `provenance_chain` field, which every grain carries.
+
+Each provenance entry records a `source_hash` (the content address of the source grain), a `method` (how the grain was derived), and a `weight` (how much the source contributed). This creates a complete, immutable derivation trail. When combined with an implementation's hash-chained audit log, this satisfies the information system activity review requirement — every grain's lineage is traceable back to its original source.
+
+### 45 CFR Section 164.312: Technical safeguards
+
+HIPAA's technical safeguards require access controls, audit controls, integrity mechanisms, person or entity authentication, and transmission security. The specific requirements include unique user identification, encryption and decryption of ePHI, and mechanisms to authenticate electronic protected health information.
+
+OMS maps to these requirements as follows:
+
+- **Encryption**: AES-256-GCM for grain-level encryption (the `encrypted` flag, byte 1, bit 1). This is a NIST-approved encryption standard that satisfies HIPAA's addressable encryption specification.
+- **Authentication**: COSE Sign1 envelopes (Section 9) with Ed25519 signatures and W3C DID-based identity. The `author_did` field identifies exactly which agent or system created each grain.
+- **Integrity**: Content addressing via SHA-256 — any byte change produces a different content address. Grains are immutable by design.
+- **Audit controls**: Every grain carries `created_at`, `author_did`, `provenance_chain`, and `user_id`. The hash-chained audit log at the store level (Level 3 conformance, Section 17.3) provides tamper-evident activity records.
+
+<Callout type="info">
+HIPAA's encryption requirement under 45 CFR Section 164.312(a)(2)(iv) is classified as "addressable" — meaning covered entities must implement it or document an equivalent alternative. AES-256-GCM is widely accepted as meeting this requirement.
+</Callout>
+
+## Per-patient encryption and crypto-erasure
+
+Section 20.3 of the OMS specification defines a per-user encryption pattern that maps directly to per-patient key management in healthcare.
+
+The pattern works as follows:
+
+1. **Derive per-patient key** via HKDF-SHA256 from a master key combined with the patient's `user_id`
+2. **Encrypt grain bytes** with AES-256-GCM using the patient-specific key
+3. **Generate HMAC token** (blind index) for the encrypted `user_id` field, enabling lookups without exposing the plaintext patient identifier
+4. **Store**: `{content_address: encrypted_blob, user_id_token: hmac(...)}`
+5. **Query**: Look up the blind index first, then decrypt matching grains
+
+The critical property of this design is crypto-erasure. When a patient exercises their deletion rights — whether under state law, organizational policy, or direct request — the healthcare organization destroys that patient's derived key. All grains encrypted with that key become unrecoverable ciphertext. This is an O(1) operation: destroy one key, erase all data for one patient, regardless of how many grains exist across how many providers.
+
+<Callout type="warning">
+The OMS specification notes (Section 20.2) that encrypting a grain changes its content address — the hash is computed over ciphertext, not plaintext. Encrypted grains do not deduplicate via content address. Systems requiring deduplication of encrypted data SHOULD compute and store the plaintext content address separately as metadata before encryption.
+</Callout>
+
+## Selective disclosure for cross-provider sharing
+
+When a primary care physician refers a patient to a specialist, the specialist needs the diagnosis and relevant clinical data — but not necessarily the patient's identity, insurance information, or the referring provider's internal system details. HIPAA's minimum necessary standard (45 CFR Section 164.502(b)) requires that covered entities limit PHI disclosure to the minimum necessary to accomplish the intended purpose.
+
+OMS selective disclosure (Section 10) enables exactly this. The referring system can share a Fact grain about the diagnosis while eliding the `subject` (patient identity) and `user_id` fields:
+
+```json
+{
+  "type": "fact",
+  "relation": "diagnosed_with",
+  "object": "Type 2 Diabetes Mellitus",
+  "confidence": 0.92,
+  "source_type": "llm_generated",
+  "created_at": 1739900000000,
+  "_elided": {
+    "subject": "sha256:8f3a2b1c...",
+    "user_id": "sha256:d4e5f6a7..."
+  },
+  "_disclosure_of": "sha256:original_grain_hash..."
+}
+```
+
+The specialist can verify the diagnosis is authentic — the original grain is COSE-signed, and the elision hashes prove the hidden fields exist and have not been tampered with. But the specialist cannot recover the patient's identity from the SHA-256 hash. If and when the specialist is authorized to see the full record, the `_disclosure_of` field links to the original grain for verification.
+
+Section 10.2 specifies exactly which fields are elidable. The `subject` field is elidable because it may contain PII. The `relation` field is not — the receiver must know the knowledge structure. The `confidence` field is not — it is essential for trust decisions. This is a deliberate design choice: selective disclosure preserves the clinical meaning of the grain while hiding identifying information.
+
+## Bi-temporal queries for clinical audit
+
+Healthcare frequently needs to answer questions that require two time dimensions. Section 15 of the OMS specification defines bi-temporal modeling with five timestamps per grain.
+
+Consider a critical clinical question: "What was the patient's medication at the time of the adverse event?"
+
+This requires a bi-temporal query. The adverse event occurred at a specific real-world time. The question is: what medication Facts were valid (in the real world) at that moment, according to what the system knew at that time?
+
+OMS supports four query patterns (Section 15.2):
+
+| Query | Fields used | Clinical example |
+|-------|-------------|------------------|
+| "What does the system know now?" | `system_valid_to` is null/absent | Current active medications |
+| "What was true on date X?" | `valid_from <= X <= valid_to` | Medications active during adverse event |
+| "What did the system know at time T?" | `system_valid_from <= T` AND (`system_valid_to` is null OR &gt; T) | What the prescribing agent knew when it issued the prescription |
+| "Reconstruct state at audit time T" | Combine event-time and system-time | Full reconstruction for regulatory investigation |
+
+The fourth query pattern is particularly important for healthcare investigations. If a patient experiences an adverse drug interaction on February 15, an auditor needs to reconstruct: what medications were active on February 15 (`valid_from <= Feb 15 <= valid_to`), according to what the clinical system knew on February 15 (`system_valid_from <= Feb 15`). A medication that was entered into the system on February 16 — even if backdated with `valid_from` set to February 1 — would not appear in this query, because its `system_valid_from` is after the audit time.
+
+This bi-temporal integrity is fundamental to clinical audit. It prevents retroactive modifications from appearing in historical reconstructions, even though the OMS immutability model means the original data is never actually modified — supersession creates new grains, and the temporal fields make the timeline precise.
+
+## Cross-provider portability via .mg files
+
+When a patient transfers from one healthcare provider to another, their complete clinical history should transfer with them — intact, signed, and verifiable. The `.mg` file format (Section 11) makes this possible.
+
+A `.mg` file is a portable container holding an indexed set of grains with a SHA-256 checksum over the entire file. For a patient transfer, the originating provider exports all grains associated with the patient's `user_id` into a single `.mg` file. The 16-byte header includes a grain count (uint32), and the offset index enables random access to any grain by position.
+
+Every grain in the file carries its original `author_did` — the DID of the agent or system that created it. If the grains are COSE-signed, the receiving provider can verify each signature against the originating provider's DID. The content addresses (SHA-256 hashes) prove no grain has been modified in transit. The `provenance_chain` in each grain traces exactly how it was derived.
+
+The result is a patient record that is:
+
+- **Complete** — every Fact, Episode, Observation, Goal, ToolCall, and Checkpoint in one file
+- **Signed** — cryptographically attributable to the originating system
+- **Verifiable** — any byte change is detectable via content address mismatch
+- **Portable** — the `.mg` format is language-agnostic and platform-independent
+- **Auditable** — the provenance chain and bi-temporal timestamps provide full lineage
+
+<Callout type="success">
+The `.mg` file footer contains a SHA-256 checksum over the entire file (header + index + grains). This means the receiving provider can verify the integrity of the entire transfer with a single hash comparison before processing any individual grain.
+</Callout>
+
+## Putting it together: a clinical workflow
+
+Consider a complete clinical workflow modeled in OMS:
+
+1. **Patient check-in**: The clinical agent creates a Checkpoint grain capturing current care plan state
+2. **Vitals collection**: Blood pressure, heart rate, and temperature become Observation grains with appropriate `observer_type` values
+3. **Clinical encounter**: The consultation is recorded as an Episode grain with the raw clinical notes
+4. **Diagnosis update**: The agent generates or confirms Fact grains with `relation: "diagnosed_with"`, linking to the Observation and Episode grains via `derived_from`
+5. **Lab order**: The agent calls the lab order API, creating a ToolCall grain with the order details and result
+6. **Treatment plan**: Recovery targets become Goal grains with `criteria_structured` for machine-evaluable success conditions and `priority` for treatment urgency
+7. **Specialist referral**: A selectively disclosed subset of grains is shared with the specialist — diagnosis Facts with patient identity elided
+
+Every grain in this workflow is immutable, content-addressed, and carries sensitivity bits set to `11` (PHI). Every grain has a `user_id` enabling per-patient encryption and crypto-erasure. Every grain's provenance is traceable. And every grain can be exported in a `.mg` file for portability.
+
+This is not a hypothetical architecture. It is a direct application of the seven memory types, the sensitivity classification system, the per-user encryption pattern, the selective disclosure mechanism, and the bi-temporal model — all defined in the OMS v1.0 specification with precise binary formats and validation rules.
+
+Healthcare AI agents need memory that is as carefully designed as the clinical decisions they support. OMS provides the standard for building it.

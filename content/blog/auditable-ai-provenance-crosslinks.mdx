@@ -1,0 +1,258 @@
+---
+title: "Auditable AI Provenance: Cross-Links and Derivation Trails in OMS"
+description: "How Section 14 of the Open Memory Specification enables full audit trails through provenance chains and typed cross-links — the derivation trail every grain carries, the closed vocabulary of 11 relation types, the critical normative note on 'replaces', and how grains form knowledge graphs with typed edges."
+date: "2026-02-19"
+readTime: "14 min read"
+tags: ["provenance", "cross-links", "audit", "knowledge-graph"]
+---
+
+A financial regulator asks: "How did your AI system arrive at this credit decision?" A medical board asks: "What evidence supported this treatment recommendation?" A compliance officer asks: "Can you trace this data point back to its original source?"
+
+These are not rhetorical questions. They are legal requirements. And answering them requires two things that most AI memory systems lack: a complete derivation trail showing how each piece of knowledge was produced, and typed semantic links showing how pieces of knowledge relate to each other.
+
+The Open Memory Specification addresses both in Section 14: **Cross-Links and Provenance**.
+
+## The provenance chain
+
+Every grain in OMS can carry a `provenance_chain` field (Section 14.1) — an array that records the complete derivation trail of that grain. Each entry in the chain identifies a source grain by its content address, describes the method by which it contributed, and assigns a weight indicating how much it contributed.
+
+```json
+{
+  "provenance_chain": [
+    {"source_hash": "abc123...", "method": "user_input", "weight": 1.0},
+    {"source_hash": "def456...", "method": "frequency_consolidation", "weight": 0.8}
+  ]
+}
+```
+
+Each entry has three fields:
+
+- **`source_hash`** — the content address (SHA-256 hash) of the source grain
+- **`method`** — the consolidation method or source type that produced this derivation (e.g., `"user_input"`, `"frequency_consolidation"`, `"llm_generated"`, `"sensor"`, `"imported"`)
+- **`weight`** — a float64 in the range 0.0 to 1.0 indicating how much this source contributed to the derived grain
+
+The provenance chain is ordered — array elements preserve insertion order per Section 4.6 of the canonical serialization rules. The first entry typically represents the primary source, with subsequent entries representing secondary or supporting sources.
+
+<Callout type="info">
+The `provenance_chain` field uses full key names in its inner maps — it is NOT subject to nested field compaction. This is specified in Section 4.7: only `content_refs`, `embedding_refs`, and `related_to` use nested compaction. The keys `source_hash`, `method`, and `weight` are serialized verbatim.
+</Callout>
+
+## Related-to cross-links
+
+While provenance chains track derivation (how a grain was produced), the `related_to` field (Section 14.2) tracks semantic relationships between grains — grains that are similar, contradictory, elaborative, or otherwise connected.
+
+```json
+{
+  "related_to": [
+    {
+      "hash": "abc123...",
+      "relation_type": "similar",
+      "weight": 0.85
+    },
+    {
+      "hash": "def456...",
+      "relation_type": "elaborates",
+      "weight": 0.70
+    }
+  ]
+}
+```
+
+Each entry has three fields:
+
+- **`hash`** — the content address of the related grain
+- **`relation_type`** — one of 11 predefined types (see the relation type registry below)
+- **`weight`** — a float64 in the range 0.0 to 1.0 indicating the strength of the relationship
+
+Unlike `provenance_chain`, the `related_to` field uses nested field compaction (Section 4.7). The compacted keys are defined in the RELATED_TO_FIELD_MAP:
+
+| Full Name | Short Key | Type |
+|-----------|-----------|------|
+| `hash` | `h` | string |
+| `relation_type` | `rl` | string |
+| `weight` | `w` | float64 |
+
+In the serialized blob, the JSON above becomes maps with keys `h`, `rl`, and `w` — saving bytes in grains that carry many cross-links.
+
+## The relation type registry: a closed vocabulary
+
+Section 14.3 defines 11 relation types in a **closed vocabulary**. This is intentionally not extensible. The rationale is specific and important: an open vocabulary would allow PII to leak through relation names. An application that invents a relation type like `"patient_alice_treated_by"` has embedded personally identifiable information in a field that might be shared, indexed, or logged without the same privacy protections applied to the grain's content fields.
+
+The 11 types and their semantics:
+
+| Type | Meaning | Direction |
+|------|---------|-----------|
+| `similar` | Semantically similar content | Symmetric |
+| `contradicts` | Incompatible claims | Symmetric |
+| `elaborates` | Adds detail or specificity | Asymmetric |
+| `generalizes` | More abstract version | Asymmetric |
+| `temporal_next` | Event occurs after | Asymmetric |
+| `temporal_prev` | Event occurs before | Asymmetric |
+| `causal` | Causes or preconditions | Asymmetric |
+| `supports` | Provides corroborating evidence | Asymmetric |
+| `refutes` | Provides contradicting evidence (weaker than `contradicts`) | Asymmetric |
+| `replaces` | Supersedes (outdated but not wrong) — **advisory only** | Asymmetric |
+| `depends_on` | Validity depends on referenced grain | Asymmetric |
+
+The direction matters. **Symmetric** relations are bidirectional: if grain A is `similar` to grain B, then grain B is `similar` to grain A. **Asymmetric** relations are directional: if grain A `elaborates` grain B, that does not mean grain B `elaborates` grain A. A elaborates B means A adds detail to B — the relationship flows from the grain carrying the `related_to` entry to the grain referenced by `hash`.
+
+### The distinction between contradicts and refutes
+
+Two relation types deal with disagreement, at different strengths:
+
+- **`contradicts`** (symmetric) — the claims are incompatible. If grain A contradicts grain B, they cannot both be true. This is a strong claim about logical inconsistency.
+- **`refutes`** (asymmetric) — the evidence in grain A weakens the claim in grain B, but does not necessarily prove it false. This is a weaker claim about evidential weight.
+
+A fact grain stating "The server is running Ubuntu 22.04" and another stating "The server is running Ubuntu 24.04" are `contradicts` — both cannot be true simultaneously. A fact grain stating "Response time was 200ms at 3pm" and another stating "The system was under heavy load at 3pm" might be `refutes` — the load observation weakens confidence in the response time claim without directly contradicting it.
+
+### The critical normative note on "replaces"
+
+The `replaces` relation type is the most restricted of the eleven, and its normative treatment is essential to understanding OMS security.
+
+<Callout type="security">
+The `replaces` relation type is a semantic annotation only. It does NOT constitute formal supersession and MUST NOT cause a conformant store to update the target grain's index entry (`superseded_by`, `contradicted`, `system_valid_to`). Conformant clients MUST determine a grain's current status solely from the index `superseded_by` and `contradicted` fields, never from `related_to` links.
+</Callout>
+
+This rule exists because `replaces` would otherwise be a bypass path for `invalidation_policy` (Section 23.7). Consider a grain with `mode: "locked"` — no supersession or contradiction is permitted. If an agent could write a new grain with `relation_type: "replaces"` pointing at the locked grain, and a store treated that as supersession, the lock would be meaningless.
+
+The normative rule closes this path. An agent can write a grain claiming `replaces` — it is a valid, content-addressed object — but the target grain's index entry remains unchanged. The target grain stays current. Its `invalidation_policy` is not affected. The `replaces` link is informational only: "I believe this newer grain should replace that older one." Whether the replacement actually happens is governed entirely by the formal supersession mechanism and its `invalidation_policy` checks.
+
+## Provenance chain + derived_from: the complete audit trail
+
+Two OMS fields work together to create full audit trails:
+
+**`derived_from`** is an array of content addresses (parent grain hashes) in the core field set (Section 6.1). It records the direct parent-child relationship: "This grain was derived from these specific source grains."
+
+**`provenance_chain`** adds detail to that relationship: for each source, what method was used and how much it contributed.
+
+Together, they answer different questions:
+
+- **`derived_from`** answers: "What grains was this derived from?" — a list of parent content addresses
+- **`provenance_chain`** answers: "How was each source used, and to what degree?" — method and weight for each contribution
+
+Consider a consolidated Fact grain that was produced by analyzing three Episode grains and extracting a common pattern. The `derived_from` field lists the three episode hashes. The `provenance_chain` provides the detail:
+
+```json
+{
+  "type": "fact",
+  "subject": "user",
+  "relation": "prefers",
+  "object": "morning meetings over afternoon meetings",
+  "confidence": 0.85,
+  "source_type": "consolidated",
+  "created_at": 1768471200000,
+  "derived_from": [
+    "a1b2c3d4e5f6...",
+    "f6e5d4c3b2a1...",
+    "1a2b3c4d5e6f..."
+  ],
+  "provenance_chain": [
+    {"source_hash": "a1b2c3d4e5f6...", "method": "frequency_consolidation", "weight": 0.6},
+    {"source_hash": "f6e5d4c3b2a1...", "method": "frequency_consolidation", "weight": 0.3},
+    {"source_hash": "1a2b3c4d5e6f...", "method": "frequency_consolidation", "weight": 0.1}
+  ]
+}
+```
+
+The `derived_from` array tells you the parents. The `provenance_chain` tells you that the first episode contributed 60% of the evidence, the second contributed 30%, and the third contributed 10%. A compliance auditor can follow this trail: from the consolidated fact, to each source episode, to the episodes' own provenance chains — all the way back to the original user input or sensor reading.
+
+## Building knowledge graphs
+
+The combination of semantic triples in Fact grains and typed cross-links in `related_to` creates a rich graph structure.
+
+Each Fact grain is a semantic triple: `subject` - `relation` - `object`. This maps directly to RDF (Section 8.1): `<grain:subject> <grain:relation> "grain:object" .` The grain itself is a node in the knowledge graph, and its semantic triple defines an edge between the subject entity and the object entity.
+
+The `related_to` field adds a second layer of edges — not between entities, but between grains themselves. Grain A `elaborates` grain B. Grain C `supports` grain D. Grain E `contradicts` grain F. These are typed, weighted edges in a grain-level knowledge graph.
+
+The two layers compose naturally:
+
+1. **Entity-level graph** — Fact triples create edges between subjects and objects. "Alice works_at ACME Corp", "ACME Corp located_in San Francisco", "San Francisco is_in California" form a connected entity graph.
+
+2. **Grain-level graph** — Cross-links create edges between grains. The grain recording Alice's employment `elaborates` a grain about ACME Corp's team size. A grain about Alice's departure `contradicts` the employment grain. A grain about quarterly revenue `supports` the team expansion grain.
+
+3. **Provenance graph** — `derived_from` and `provenance_chain` create edges from derived grains to their sources. A consolidated pattern grain points back to the raw episodes it was extracted from. Those episodes point back to the user interactions that produced them.
+
+All three layers are traversable by content address. Every reference is a SHA-256 hash that can be looked up in any conformant store. No opaque IDs, no platform-specific references, no broken links when data moves between systems.
+
+## Test Vector 4: Cross-links in practice
+
+Section 21.4 of the specification provides a test vector demonstrating cross-links:
+
+```json
+{
+  "type": "fact",
+  "subject": "Bob",
+  "relation": "manages",
+  "object": "Project Alpha",
+  "confidence": 0.90,
+  "source_type": "llm_generated",
+  "created_at": 1737000000000,
+  "related_to": [
+    {
+      "hash": "4c4149355d3f3e1114e6a72bc5c2813a3ecd4deab2ba8771eaca8556b2c032f2",
+      "relation_type": "similar",
+      "weight": 0.85
+    },
+    {
+      "hash": "6f7fb8935e150f61a607ece0582c87c42b9975d356def0e41164b85852836145",
+      "relation_type": "elaborates",
+      "weight": 0.70
+    }
+  ],
+  "author_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+}
+```
+
+This grain asserts that Bob manages Project Alpha (confidence 0.90, LLM-generated). It carries two cross-links:
+
+1. A `similar` link (weight 0.85) to another grain — perhaps a grain stating "Bob leads Project Alpha" or "Bob oversees Project Alpha." The high weight indicates strong semantic overlap.
+
+2. An `elaborates` link (weight 0.70) to a different grain — perhaps a grain about Project Alpha's scope or team composition. This grain adds specificity to that more general grain.
+
+In the canonical serialization, the `related_to` entries use nested compaction: `hash` becomes `h`, `relation_type` becomes `rl`, `weight` becomes `w`. The compacted keys are sorted lexicographically within each entry map: `h`, `rl`, `w`.
+
+## Use cases for provenance and cross-links
+
+The combination of provenance chains and typed cross-links enables several categories of applications that require traceable, auditable knowledge.
+
+### Regulatory audit trails
+
+SOX compliance requires a complete chain of how a financial decision was derived. With OMS provenance chains, an auditor can start from a final decision grain and trace backward through every consolidation step, every source grain, every weight assignment — all the way back to the original data entry. Each link in the chain is a content-addressed, immutable reference. No link can be retroactively altered without producing a different hash and breaking the chain.
+
+The `method` field in each provenance entry provides the audit narrative: this grain came from `"user_input"`, that one from `"frequency_consolidation"`, another from `"llm_generated"`. The `weight` field quantifies the contribution: the user input contributed 80%, the LLM inference contributed 20%. This is the kind of granular traceability that regulators require.
+
+### Explainable AI
+
+When an AI system produces a recommendation, users and regulators increasingly demand explanations. Provenance chains provide the mechanical basis for explanation: trace any output back to its inputs, with method and weight annotations at each step.
+
+Cross-links add the semantic context: the recommendation grain `supports` a hypothesis grain, which `elaborates` a pattern grain, which was `derived_from` a set of episode grains. The explanation is not a post-hoc rationalization — it is the actual derivation trail recorded at each step of the reasoning process.
+
+The `depends_on` relation type is particularly relevant for explainability. If grain A `depends_on` grain B, then the validity of A is contingent on the validity of B. If B is later contradicted or superseded, a conformant system can propagate that status change to all grains that depend on B — providing automatic invalidation of conclusions whose premises have been undermined.
+
+### Scientific reproducibility
+
+Citation trails in scientific research map directly to provenance chains. A finding grain references the data grains it was derived from. A meta-analysis grain references the individual study grains it consolidated. Each reference is a content-addressed, immutable link to a specific version of the source data.
+
+Cross-links capture the relationships between findings: one study `supports` another, a replication `contradicts` the original, a review `generalizes` across multiple studies. The `temporal_next` and `temporal_prev` relations capture chronological relationships between experimental observations.
+
+### Compliance reporting
+
+GDPR Article 30 requires records of processing activities. The combination of `provenance_chain` (which records how each grain was derived), `created_at` timestamps (which record when processing occurred), and `author_did` (which records who performed the processing) provides the data needed to generate processing records.
+
+HIPAA technical safeguards (45 CFR Section 164.312) require audit controls. OMS provenance chains serve as a built-in audit trail: every grain records its derivation history, and that history is immutable and content-addressed. An auditor can verify the integrity of the entire chain by recomputing content addresses — if any link has been tampered with, its hash will not match.
+
+## The closed vocabulary as a privacy safeguard
+
+It is worth returning to why the relation type registry is closed. An open vocabulary — one that allows applications to define custom relation types — seems more flexible. But flexibility creates a privacy surface.
+
+Consider a healthcare application that defines `"patient_diagnosis"` as a relation type. Every grain carrying that relation type now leaks the fact that it represents a patient diagnosis, even if the grain's content fields are encrypted or elided through selective disclosure. Relation types appear in cross-links, which may be shared across systems for graph traversal. A closed vocabulary with generic types like `supports`, `elaborates`, and `depends_on` conveys structural relationships without revealing the semantic category of the content.
+
+This is a deliberate design trade-off. The 11 relation types are expressive enough to capture the structural relationships needed for knowledge graphs, audit trails, and provenance tracking. They are generic enough to avoid leaking domain-specific information through the type system itself.
+
+## Conclusion
+
+Provenance and cross-links are complementary mechanisms that together create complete, auditable knowledge trails. Provenance chains record derivation: how a grain was produced, from what sources, using what methods, with what contribution weights. Cross-links record relationships: how grains connect to each other semantically, with 11 typed relations covering similarity, contradiction, elaboration, temporal sequence, causation, and more.
+
+The closed vocabulary prevents PII leakage through relation names. The normative treatment of `replaces` closes a bypass path for grain protection. The nested field compaction keeps cross-link-heavy grains compact. And the content-addressed references ensure that every link in the graph is verifiable and tamper-evident.
+
+For organizations facing regulatory requirements around explainability, audit trails, and data lineage, these are not optional features. They are the mechanism by which an AI system proves it can account for every piece of knowledge it holds and every conclusion it has drawn.

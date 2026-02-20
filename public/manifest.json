@@ -1,0 +1,21 @@
+{
+  "name": "Memory Grain — Open Memory Specification",
+  "short_name": "Memory Grain",
+  "description": "The Open Memory Specification (OMS) — an open standard for immutable, content-addressed agent memory.",
+  "start_url": "/",
+  "display": "browser",
+  "background_color": "#ffffff",
+  "theme_color": "#0a0a0a",
+  "icons": [
+    {
+      "src": "/logo-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/logo-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

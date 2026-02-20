@@ -1,0 +1,218 @@
+---
+title: "Bi-Temporal Modeling in OMS: Five Timestamps, Full History"
+description: "OMS gives every memory grain five timestamps spanning two independent time axes — event time and system time. This bi-temporal model enables precise auditing, point-in-time reconstruction, and regulatory compliance without sacrificing immutability."
+date: "2026-02-19"
+readTime: "12 min read"
+tags: ["temporal", "bi-temporal", "timestamps", "audit", "technical"]
+---
+
+When did Alice start working at Acme Corp? When did the agent *learn* that Alice works at Acme Corp? And when did the agent discover she had *left*?
+
+These are three different questions with three different answers, and conflating them is a common source of bugs in knowledge systems. Traditional databases track one timestamp per record — usually the write time. But production systems that must answer regulatory, legal, or medical questions need to distinguish between *when something was true in the world* and *when the system knew about it*.
+
+This distinction is called **bi-temporal modeling**, and the Open Memory Specification builds it into every memory grain. Section 15 of the OMS v1.0 specification defines five timestamp fields across two independent time axes, enabling queries that no single-timestamp system can support.
+
+## The problem with one timestamp
+
+Consider a simple fact: "Alice works at Acme Corp." A single-timestamp system records when this fact was written to the database. But that one timestamp cannot tell you when Alice actually started (she may have started weeks before the system learned about it), when she left, when the system first knew, when it stopped considering the fact current, or what it believed at some past audit point. A single `created_at` collapses all of these into one value. Bi-temporal modeling separates them.
+
+## Five timestamps per grain
+
+Section 15.1 of the OMS specification defines five timestamp fields, organized across two axes: **event time** (when things happened in the real world) and **system time** (when the system processed them).
+
+| Field | Meaning | Real-World Reference | System Reference |
+|-------|---------|----------------------|------------------|
+| `valid_from` | When fact became true | Event start time | -- |
+| `valid_to` | When fact stopped being true | Event end time | -- |
+| `created_at` | When grain was added to system | Ingestion timestamp | System write time |
+| `system_valid_from` | When grain became active in system | -- | System validity start (blob field) |
+| `system_valid_to` | When grain was superseded/retracted | -- | System validity end (index layer) |
+
+The first two fields (`valid_from` and `valid_to`) describe **event time** — the real-world interval during which the fact held true. The last two (`system_valid_from` and `system_valid_to`) describe **system time** — the interval during which the system considered this grain to be current. The `created_at` field sits between the two axes: it records when the grain was physically written, which is typically the same as `system_valid_from` but is always present as the ingestion timestamp.
+
+### Event time: when things were true
+
+Event-time fields answer questions about the real world.
+
+**`valid_from`** is the moment the fact became true. For "Alice works at Acme Corp," this is her start date — not when the system learned about her employment, but when her employment actually began.
+
+**`valid_to`** is the moment the fact stopped being true. For Alice, this is her last day at Acme Corp. If the fact is still current (she still works there as far as anyone knows), `valid_to` is omitted or null. Following the OMS canonical serialization rules (Section 4), null values are omitted entirely from the serialized blob.
+
+Together, `valid_from` and `valid_to` define the **validity interval** of the fact in the real world.
+
+### System time: when the system knew
+
+System-time fields answer questions about the system's state of knowledge.
+
+**`system_valid_from`** is when the grain became active in the system — when it entered the "current and trusted" set. This is stored in the immutable blob at creation time.
+
+**`system_valid_to`** is when the grain was superseded or retracted — when a newer grain replaced it or it was marked as contradicted. This field has a special status in OMS: it is typically **not stored in the immutable blob**.
+
+<Callout type="info">
+Section 15.3 of the specification makes an important implementation note: `system_valid_to` is typically an **index-layer field**, not stored in immutable `.mg` blobs. The index adds this field when supersession occurs. The `.mg` blob itself carries `system_valid_from` at creation; the index tracks the end time. This design preserves immutability — grains are never modified after creation — while still supporting system-time queries through the mutable index layer.
+</Callout>
+
+## Four bi-temporal query patterns
+
+Section 15.2 of the specification defines four query patterns that the five timestamp fields enable. Each pattern uses a different combination of event-time and system-time fields.
+
+### Query 1: "What does the agent know now?"
+
+**Fields used:** `system_valid_to` is null/absent
+
+This is the most common query — retrieve all grains that the system currently considers active. A grain is current if it has not been superseded or retracted. In index terms, its `system_valid_to` is null (never set) or absent.
+
+```
+SELECT * FROM grains
+WHERE system_valid_to IS NULL
+```
+
+This returns the agent's current state of knowledge, regardless of when the underlying facts were true in the real world.
+
+### Query 2: "What was true on date X?"
+
+**Fields used:** `valid_from <= X <= valid_to`
+
+This is a pure event-time query. Given a date X, find all grains whose validity interval contains that date.
+
+```
+SELECT * FROM grains
+WHERE valid_from <= X
+  AND (valid_to IS NULL OR valid_to >= X)
+```
+
+This answers questions like "Who did Alice work for on June 15, 2025?" It does not care about system time — even if the system learned about the employment months later, the event-time query returns it.
+
+### Query 3: "What did the agent know at time T?"
+
+**Fields used:** `system_valid_from <= T` AND (`system_valid_to` is null OR `system_valid_to > T`)
+
+This is a pure system-time query. Given a timestamp T, reconstruct the system's state of knowledge as it existed at that moment. A grain was "known" at time T if it had already entered the system (`system_valid_from <= T`) and had not yet been superseded (`system_valid_to` is null or greater than T).
+
+```
+SELECT * FROM grains
+WHERE system_valid_from <= T
+  AND (system_valid_to IS NULL OR system_valid_to > T)
+```
+
+This is the query that enables audit reconstruction. An auditor asks: "What did the agent believe on January 20, 2025?" The system retrieves every grain that was active at that moment — including grains that have since been superseded, and excluding grains that were created after that date.
+
+### Query 4: "Reconstruct state at audit time T"
+
+**Fields used:** Combine event-time and system-time
+
+This is the full bi-temporal query — the combination of Queries 2 and 3. It answers: "What did the system believe was true about date X, as of system time T?"
+
+```
+SELECT * FROM grains
+WHERE system_valid_from <= T
+  AND (system_valid_to IS NULL OR system_valid_to > T)
+  AND valid_from <= X
+  AND (valid_to IS NULL OR valid_to >= X)
+```
+
+This is the most powerful query and the one most critical for regulatory compliance. It reconstructs the system's view of a specific moment in real-world time, as that view existed at a specific system time. We will see concrete examples of why this matters in the industry use cases below.
+
+## Worked example: Test Vector 3
+
+Section 21.3 of the specification provides Test Vector 3, a bi-temporal fact that illustrates how the five timestamps work together. The grain represents "Alice works at Acme Corp" with explicit temporal bounds:
+
+```json
+{
+  "type": "fact",
+  "subject": "Alice",
+  "relation": "works_at",
+  "object": "Acme Corp",
+  "confidence": 0.95,
+  "source_type": "user_explicit",
+  "created_at": 1737000000000,
+  "valid_from": 1735689600000,
+  "valid_to": 1767225600000,
+  "system_valid_from": 1737000000000,
+  "author_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+}
+```
+
+Let us decode the timestamps. OMS stores all datetime values as Unix epoch milliseconds (int64), computed as `floor(datetime.timestamp() * 1000)` per Section 4.8 of the specification.
+
+| Field | Epoch ms | Human-readable (UTC) | Meaning |
+|-------|----------|----------------------|---------|
+| `valid_from` | 1735689600000 | 2025-01-01T00:00:00Z | Alice started at Acme Corp |
+| `valid_to` | 1767225600000 | 2026-01-01T00:00:00Z | Alice left Acme Corp |
+| `created_at` | 1737000000000 | 2025-01-16T04:00:00Z | Grain was ingested into the system |
+| `system_valid_from` | 1737000000000 | 2025-01-16T04:00:00Z | Grain became active in the system |
+
+Notice the gap: Alice started at Acme Corp on January 1, 2025, but the system did not learn about it until January 16, 2025. This 15-day delay between the real-world event and the system's knowledge of it is exactly the kind of discrepancy that bi-temporal modeling captures.
+
+Now consider the queries against this grain:
+
+- **"What does the agent know now?"** -- If `system_valid_to` is null (no supersession has occurred), this grain is returned. The agent currently knows Alice worked at Acme Corp.
+- **"What was true on March 15, 2025?"** -- `valid_from` (Jan 1) &lt;= March 15 &lt;= `valid_to` (Jan 1, 2026). Yes, Alice worked at Acme Corp on that date.
+- **"What was true on February 15, 2026?"** -- `valid_to` is January 1, 2026, which is before February 15. This grain is not returned. Alice had left by then.
+- **"What did the agent know on January 10, 2025?"** -- `system_valid_from` is January 16. The agent did not yet know this fact on January 10, even though Alice had already started at Acme Corp. The grain is not returned.
+- **"Reconstruct the agent's view of March 15, 2025, as known on January 20, 2025"** -- `system_valid_from` (Jan 16) &lt;= Jan 20 (yes). `valid_from` (Jan 1) &lt;= March 15 &lt;= `valid_to` (Jan 1, 2026) (yes). The grain is returned. The agent knew, as of January 20, that Alice was working at Acme Corp during March 2025.
+
+This is one grain with four fields driving five distinct query outcomes.
+
+## Immutability and the index layer
+
+A key design constraint in OMS is that grains are immutable. Once created, the blob bytes never change, and the content address (SHA-256 of the complete blob) is permanent. So how does `system_valid_to` get set if the blob cannot be modified?
+
+The answer is the **index layer**. As Section 15.3 states, `system_valid_to` is typically an index-layer field. When a new grain supersedes an older one (via the `derived_from` mechanism described in Section 14), the index sets `system_valid_to` on the predecessor grain's index entry. The blob itself is untouched.
+
+This separation has important consequences:
+
+- **The blob remains content-addressable.** The same content address works before and after supersession.
+- **The blob remains signable.** A COSE Sign1 signature over the blob remains valid after supersession.
+- **System time is mutable metadata.** The index can update `system_valid_to` without violating immutability.
+- **Event time is immutable data.** The `valid_from` and `valid_to` fields, stored in the blob, are fixed at creation and covered by the content address.
+
+The four blob-level timestamp fields (`valid_from`, `valid_to`, `created_at`, `system_valid_from`) are all set at grain creation time and never change. Only `system_valid_to` changes, and it lives in the mutable index, not the immutable blob.
+
+## Industry use cases
+
+Bi-temporal modeling is not a theoretical exercise. It is a regulatory and operational requirement across several industries.
+
+### Financial compliance (SOX)
+
+The Sarbanes-Oxley Act (SOX) requires publicly traded companies to maintain tamper-evident records of financial decisions and the information that supported them. Auditors routinely ask: "What data was available to the agent when this trade was recommended?"
+
+This is Query 4 — a full bi-temporal reconstruction. The auditor specifies both the decision time (system time T) and the market date in question (event time X). The system retrieves the exact set of grains that were active at the decision point and valid for the relevant market period. No single-timestamp system can answer this without maintaining complete versioned snapshots.
+
+With OMS, the grain-level `system_valid_from` and `system_valid_to` (in the index) provide the system-time axis, while `valid_from` and `valid_to` provide the event-time axis. The `reg:sox` tag in `structural_tags` (Section 13.2) flags grains for the appropriate seven-year immutable retention policy.
+
+### Medical records
+
+A patient's medical history is inherently bi-temporal. A diagnosis may be recorded on one date but retroactively determined to have been present since an earlier date. A medication's effectiveness period may span months. And a provider change means the new system needs to reconstruct what was known at any prior point.
+
+Consider: "What medications was the patient taking on the day of the adverse event, according to the records available to the treating agent at the time?" This requires event-time filtering (which medications were valid on the event date) combined with system-time filtering (which records had the agent received by then). Grains tagged with `phi:medication` (Section 13.2) at the PHI sensitivity level enable proper access control routing via the header bits.
+
+### Legal discovery
+
+In litigation, the question is often not "what is true now" but "what did the system know at the time the decision was made." If an AI agent denied a claim, approved a loan, or flagged a transaction, the relevant inquiry is the agent's state of knowledge at the moment of the decision. Bi-temporal queries reconstruct the agent's knowledge base as it existed at that moment, excluding grains that arrived after the decision and including grains that have since been superseded.
+
+### Employment records
+
+The worked example of Alice at Acme Corp is a simplified version of a real HR scenario. Employment histories involve start dates, end dates, retroactive corrections, and system-level delays (an HR system that processes records in batches). Each creates a discrepancy between event time and system time that single-timestamp systems silently lose.
+
+## Datetime precision and conversion
+
+All five timestamp fields in OMS use the same representation: Unix epoch milliseconds as a 64-bit integer (int64). Section 4.8 of the specification defines the conversion:
+
+```
+epoch_ms = floor(datetime.timestamp() * 1000)
+```
+
+Millisecond precision is stored in the payload fields. The 9-byte fixed header carries a separate `created_at` value at lower precision — 4 bytes, uint32, epoch seconds — for efficient indexing without deserialization. The full millisecond-precision `created_at` in the payload is authoritative; the header value is a routing optimization.
+
+<Callout type="warning">
+The header's `created_at` (bytes 5-8) is uint32 epoch seconds with a range of 1970 to 2106. The payload's `created_at` is int64 epoch milliseconds. These serve different purposes: the header enables O(1) time-based filtering and sorting; the payload provides the full-precision authoritative value.
+</Callout>
+
+## Designing for auditability
+
+Bi-temporal modeling is one of the properties that makes OMS grains genuinely auditable rather than merely logged. A system that records only write timestamps can tell you *what* it stored and *when it stored it*. A bi-temporal system can tell you *what was true*, *when it was true*, *when the system knew it*, and *when the system stopped believing it*.
+
+Combined with OMS's other audit features — content addressing for tamper evidence, provenance chains for derivation tracking, COSE Sign1 signatures for authenticity, and sensitivity classification for access control — bi-temporal timestamps complete the picture. An auditor can reconstruct the exact state of an agent's knowledge at any point in time, verify that no grains have been tampered with, trace every piece of knowledge back to its source, and confirm that the agent had appropriate authority to act on what it knew.
+
+The five timestamps are not metadata overhead. They are the foundation of temporal accountability.

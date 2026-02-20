@@ -1,0 +1,450 @@
+---
+title: "Agent Memory for Legal Technology: Tamper-Proof Records, Discovery, and Chain of Custody with OMS"
+description: "Legal AI agents must maintain tamper-proof records, support discovery, handle attorney-client privilege, and preserve chain of custody. The Open Memory Specification maps to these requirements through immutable grains, COSE signatures for authentication, selective disclosure for privilege, grain protection for litigation holds, and .mg files as evidence packages."
+date: "2026-02-19"
+readTime: "14 min read"
+tags: ["legal", "litigation", "evidence", "compliance", "industry"]
+---
+
+A litigation support AI agent analyzes thousands of documents for a complex commercial dispute. It extracts key dates from contracts, summarizes depositions, identifies privileged communications, and tracks case milestones. Every piece of knowledge it generates may eventually end up in front of a judge. The agent's memory is not just operational data — it is potential evidence.
+
+Legal technology imposes requirements that most software systems never face. Records must be tamper-proof. Discovery requests demand that relevant information be produced while privileged material is withheld — and the withholding must be provable. Chain of custody must trace every document and every derived insight back to its source. Litigation holds must prevent destruction of relevant materials, even when routine data management policies would normally allow deletion.
+
+The Open Memory Specification was not designed specifically for legal tech, but its core properties — immutable, content-addressed grains with cryptographic signing, selective disclosure, grain protection, and provenance chains — map directly to these requirements.
+
+## Memory type mapping for legal technology
+
+### Facts for legal knowledge
+
+Contract analysis, regulatory research, and case law review all produce structured knowledge claims. These become Fact grains with the semantic triple model:
+
+```json
+{
+  "type": "fact",
+  "subject": "contract-2024-001",
+  "relation": "effective_date",
+  "object": "2024-03-15",
+  "confidence": 0.99,
+  "source_type": "imported",
+  "created_at": 1768471200000,
+  "namespace": "litigation:case-456",
+  "derived_from": ["<document-analysis-toolcall-hash>"],
+  "structural_tags": ["legal:litigation_hold"]
+}
+```
+
+The `source_type` of `"imported"` (Section 6.1) indicates this fact was extracted from an external document through automated analysis, not stated by a human or inferred by the agent from patterns. The `derived_from` array links this Fact back to the specific ToolCall grain that performed the document analysis — the provenance chain from knowledge claim to source document.
+
+Contract terms, deadlines, party identities, financial figures — all follow this same pattern. Each is a discrete knowledge claim with a confidence score, a source type, and a provenance link to the document it came from.
+
+```json
+{
+  "type": "fact",
+  "subject": "contract-2024-001",
+  "relation": "termination_clause",
+  "object": "30 days written notice required; 90 days for material breach",
+  "confidence": 0.95,
+  "source_type": "imported",
+  "created_at": 1768471200000,
+  "namespace": "litigation:case-456",
+  "derived_from": ["<document-analysis-toolcall-hash>"]
+}
+```
+
+### Episodes for case research and client consultations
+
+Deposition summaries, case research notes, and client consultation records are unstructured text — ideal for the Episode type (Section 8.2):
+
+```json
+{
+  "type": "episode",
+  "content": "Deposition of CFO John Martinez, Case #456. Testified that the contract amendment was signed on 2024-06-10, contradicting the plaintiff's claim of 2024-05-15. Stated that all amendments require board approval per Section 12.4 of the corporate bylaws. Became evasive when questioned about email correspondence from May 2024.",
+  "created_at": 1768471200000,
+  "namespace": "litigation:case-456",
+  "user_id": "client-acme-corp",
+  "structural_tags": ["legal:litigation_hold", "deposition"],
+  "importance": 0.8
+}
+```
+
+Client consultations may contain attorney-client privileged information. The `structural_tags` can carry `"legal:privilege"` to flag this:
+
+```json
+{
+  "type": "episode",
+  "content": "Client meeting with General Counsel. Discussed litigation strategy for Case #456. Counsel advised that the email chain from May 2024 presents significant risk. Recommended early settlement if opposing counsel discovers the internal audit report.",
+  "created_at": 1768471200000,
+  "namespace": "litigation:case-456",
+  "user_id": "client-acme-corp",
+  "structural_tags": ["legal:privilege", "legal:litigation_hold"],
+  "importance": 0.9
+}
+```
+
+<Callout type="security">
+Grains tagged with `legal:privilege` carry sensitivity bits `10` (PII) in the header per the tag-to-sensitivity mapping (Section 13.4), since `legal:*` tags map to a minimum of PII classification. This ensures privileged material is routed to encrypted storage and access-controlled endpoints by default.
+</Callout>
+
+### ToolCalls for legal system interactions
+
+Every interaction with external legal systems — document review platforms, court filing systems, legal databases — is recorded as a ToolCall grain:
+
+```json
+{
+  "type": "tool_call",
+  "tool_name": "westlaw_search",
+  "arguments": {"query": "breach of contract termination clause 30 days notice", "jurisdiction": "NY", "date_range": "2020-2026"},
+  "result": {"cases_found": 47, "most_relevant": ["Smith v. Jones 2024", "ABC Corp v. DEF Inc 2023"], "search_id": "WL-20260115-001"},
+  "success": true,
+  "duration_ms": 2340,
+  "created_at": 1768471200000,
+  "namespace": "litigation:case-456"
+}
+```
+
+```json
+{
+  "type": "tool_call",
+  "tool_name": "court_filing_submit",
+  "arguments": {"case_number": "2026-CV-456", "document_type": "motion_to_compel", "filing_id": "F-20260115-001"},
+  "result": {"status": "accepted", "confirmation_number": "CF-789012", "filed_at": "2026-01-15T14:30:00Z"},
+  "success": true,
+  "duration_ms": 4100,
+  "created_at": 1768471200000,
+  "namespace": "litigation:case-456",
+  "structural_tags": ["legal:litigation_hold"]
+}
+```
+
+The complete audit trail — what was searched, what was filed, when, and whether it succeeded — is preserved in immutable, content-addressed grains. This matters when opposing counsel challenges the thoroughness of a document review or the timeliness of a filing.
+
+### Goals for case milestones
+
+Case milestones and litigation deadlines map to Goal grains (Section 8.7):
+
+```json
+{
+  "type": "goal",
+  "subject": "legal-team-alpha",
+  "description": "Complete document review for Case #456",
+  "goal_state": "active",
+  "source_type": "user_explicit",
+  "created_at": 1768471200000,
+  "criteria": [
+    "All responsive documents identified and tagged",
+    "Privilege review completed",
+    "Production set finalized"
+  ],
+  "priority": 1,
+  "namespace": "litigation:case-456",
+  "valid_to": 1769680800000
+}
+```
+
+The `valid_to` field serves as the deadline — when the court requires the document review to be complete. The `priority` of 1 (critical) reflects that court deadlines are non-negotiable. The `criteria` array lists the specific conditions that must be satisfied before this Goal can transition to `"satisfied"`.
+
+### Workflows for legal procedures
+
+Standard legal procedures — discovery responses, motion practice, trial preparation — can be encoded as Workflow grains:
+
+```json
+{
+  "type": "workflow",
+  "trigger": "new_discovery_request",
+  "steps": [
+    "acknowledge_receipt_within_5_business_days",
+    "identify_responsive_custodians",
+    "issue_preservation_notices",
+    "collect_and_process_documents",
+    "conduct_privilege_review",
+    "prepare_privilege_log",
+    "produce_responsive_non_privileged_documents"
+  ],
+  "created_at": 1768471200000,
+  "importance": 0.7,
+  "namespace": "litigation:procedures"
+}
+```
+
+These Workflows serve as procedural memory for the legal AI agent. When a new discovery request arrives, the agent has a learned sequence of steps to follow, each derived from prior experience or firm procedures.
+
+## Sensitivity tags for legal classifications
+
+Legal data requires specific sensitivity classifications beyond the standard PII/PHI categories. OMS structural tags (Section 13.2) provide this through the `legal:` prefix:
+
+| Tag | Meaning | Implication |
+|-----|---------|-------------|
+| `legal:privilege` | Attorney-client privileged | Must not be disclosed in discovery; must appear on privilege log |
+| `legal:litigation_hold` | Subject to litigation hold | Must be preserved; cannot be deleted even under normal retention policies |
+
+Regulatory tags also apply to legal data:
+
+| Tag | Meaning | Implication |
+|-----|---------|-------------|
+| `reg:sox` | Sarbanes-Oxley applicable | Financial case data requiring 7-year immutable audit retention |
+| `reg:gdpr-art17` | GDPR erasure-eligible | Data in EU cases that may be subject to erasure requests |
+
+The `reg:` prefix (Section 13.2) identifies which regulatory storage or retention rules apply to a grain. The tag vocabulary is open-ended — implementations can use well-known regulation identifiers relevant to their jurisdiction. A grain might carry both `legal:litigation_hold` (it must be preserved for the case) and `reg:gdpr-art17` (it would normally be erasure-eligible) — the litigation hold takes precedence as a matter of law, and the grain's protection policy enforces this at the technical level.
+
+## Grain protection for litigation holds
+
+Litigation holds present a direct technical challenge: certain records must be preserved regardless of any other process. They cannot be superseded, contradicted, or removed. Section 23 of the spec provides the mechanism through `invalidation_policy`.
+
+### mode: "locked" for litigation hold
+
+When a grain is placed under litigation hold, its `invalidation_policy` uses `mode: "locked"`:
+
+```json
+{
+  "type": "fact",
+  "subject": "contract-2024-001",
+  "relation": "amendment_date",
+  "object": "2024-06-10",
+  "confidence": 0.99,
+  "source_type": "imported",
+  "created_at": 1768471200000,
+  "namespace": "litigation:case-456",
+  "structural_tags": ["legal:litigation_hold"],
+  "invalidation_policy": {
+    "mode": "locked",
+    "scope": "lineage",
+    "protection_reason": "Litigation hold — Case #456 — Judge's order dated 2026-01-15"
+  }
+}
+```
+
+With `mode: "locked"` (Section 23.2), no supersession or contradiction is permitted. A conformant store must reject any attempt with `ERR_INVALIDATION_DENIED` (Section 19.3). This is the strongest protection OMS offers — the grain cannot be invalidated by any party through any mechanism.
+
+The `protection_reason` field provides human-readable rationale: the specific case number and the date of the judge's preservation order. This is not just a technical flag — it is documentation of the legal basis for protection.
+
+### scope: "lineage" for chain protection
+
+The `scope: "lineage"` setting (Section 23.6) extends protection beyond the individual grain to all grains in the same supersession chain. This is critical for legal data: if an earlier version of a fact was superseded before the litigation hold was imposed, the entire chain — including the superseding grains — is protected.
+
+| Scope | What it protects |
+|-------|-----------------|
+| `grain` | Only the specific grain (default) |
+| `subtree` | The grain and all grains with `derived_from` pointing to it, transitively up to 16 hops |
+| `lineage` | The grain and all grains in the same supersession chain |
+
+For litigation holds, `lineage` is typically appropriate because the entire history of a fact — original claim, corrections, updates — is potentially relevant evidence.
+
+<Callout type="warning">
+Section 23.3 specifies a fail-closed rule: parsers and stores must treat unknown `invalidation_policy.mode` values as `"locked"`. If an implementation encounters a mode it does not recognize, it must reject the invalidation attempt rather than treating the policy as absent. This prevents a scenario where a new or corrupted mode value silently bypasses protection on litigation-held grains.
+</Callout>
+
+## Selective disclosure for discovery
+
+Discovery in litigation requires producing relevant documents to opposing counsel while withholding privileged material. OMS selective disclosure (Section 10) maps directly to this workflow.
+
+### Sharing case facts while eliding privileged content
+
+When producing relevant Facts, the creating party can elide fields that reveal privileged strategy or protected identities:
+
+```json
+{
+  "type": "fact",
+  "relation": "amendment_date",
+  "object": "2024-06-10",
+  "confidence": 0.99,
+  "source_type": "imported",
+  "created_at": 1768471200000,
+  "_elided": {
+    "subject": "sha256:9a3b7c...",
+    "context": "sha256:d4e5f6..."
+  },
+  "_disclosure_of": "sha256:original_grain_hash..."
+}
+```
+
+The receiving party can see that an amendment was dated 2024-06-10 and that this was extracted from a document (source_type: "imported"), but the `subject` (which contract, which party) and `context` (which might contain internal analysis notes) are hidden behind SHA-256 hashes.
+
+Section 10.2 defines which fields can be elided. The `type` field cannot be elided (the receiver must know it is a Fact). The `relation` field cannot be elided (it is core knowledge structure). The `confidence` field cannot be elided (it is essential for trust decisions). But `subject`, `object`, `context`, `structural_tags`, and `provenance_chain` can all be elided.
+
+### Attorney-client communications in privilege logs
+
+Privilege logs must identify the existence of privileged communications without revealing their contents. Selective disclosure provides this natively:
+
+```json
+{
+  "type": "episode",
+  "created_at": 1768471200000,
+  "_elided": {
+    "content": "sha256:f7a8b9...",
+    "user_id": "sha256:c1d2e3...",
+    "structural_tags": "sha256:4a5b6c..."
+  },
+  "_disclosure_of": "sha256:original_episode_hash..."
+}
+```
+
+The privilege log entry proves:
+- A communication exists (the grain is real — `_disclosure_of` links to its content address)
+- It was created at a specific time (`created_at` is non-elidable per Section 10.2)
+- It is an Episode (the `type` is non-elidable)
+- The content, user identity, and tags are all present but hidden
+
+The SHA-256 hashes in `_elided` are computed per Section 10.1.1: the hash of the canonical MessagePack encoding of each field's value. If a court later orders disclosure of the privilege, the actual values can be revealed and verified against these hashes — match proves the values were present in the original grain and have not been fabricated after the fact.
+
+<Callout type="info">
+Selective disclosure produces a derived view with a different content address than the original grain (Section 10.4). The original grain is the canonical form. COSE signatures wrap the original blob, so verification works against the original's content address, not the disclosed variant's. This means a signed grain can be selectively disclosed without re-signing.
+</Callout>
+
+## COSE signatures as evidence authentication
+
+In legal proceedings, knowing who created a record and when is as important as the record's content. COSE Sign1 signatures (Section 9) provide this authentication.
+
+### Signing grains with organizational identity
+
+A law firm signs grains with its organizational DID (Section 12.2). For enterprise environments, `did:web` ties identity to DNS:
+
+```
+did:web:smithjones-law.com:litigation:agents:doc-reviewer
+```
+
+The COSE Sign1 envelope (Section 9.1) wraps the grain's complete .mg blob:
+
+```
+COSE_Sign1 {
+  protected: {
+    1: -8,                                    // alg: EdDSA
+    4: "did:web:smithjones-law.com:agents:doc-reviewer",  // kid: signer DID
+    3: "application/vnd.mg+msgpack"          // content_type
+  },
+  unprotected: {
+    "iat": 1768471200                        // timestamp: epoch seconds
+  },
+  payload: <.mg blob bytes>,
+  signature: <Ed25519 signature, 64 bytes>
+}
+```
+
+### Verification as chain of custody
+
+Verifying a signed grain follows the process in Section 9.3:
+
+1. Parse the COSE_Sign1 structure
+2. Extract the `kid` (signer DID) from protected headers
+3. Resolve the DID to a public key (`did:web` via HTTPS, `did:key` self-contained)
+4. Verify the Ed25519 signature over the payload
+5. Deserialize the payload and verify the content address matches
+
+This process proves: **who** created the grain (the DID), **when** they signed it (the `iat` timestamp), and **what** the content was (the payload bytes). This is chain of custody at the cryptographic level — not a metadata entry in a database, but a mathematically verifiable proof.
+
+The content address itself is tamper-evident. The SHA-256 hash of the complete blob bytes means any modification — even a single bit change — produces a different hash. Combined with the COSE signature, this provides both integrity (the content has not changed) and authenticity (it was created by the claimed identity).
+
+## Provenance chains for chain of custody
+
+Legal chain of custody requires tracing every derived insight back to its source documents. The `provenance_chain` field (Section 14.1) and `derived_from` array provide this:
+
+```json
+{
+  "type": "fact",
+  "subject": "contract-2024-001",
+  "relation": "breach_identified",
+  "object": "failure to provide 30 days written notice per Section 8.2",
+  "confidence": 0.92,
+  "source_type": "agent_inferred",
+  "created_at": 1768471200000,
+  "namespace": "litigation:case-456",
+  "derived_from": [
+    "<contract-analysis-fact-hash>",
+    "<deposition-episode-hash>",
+    "<email-review-toolcall-hash>"
+  ],
+  "provenance_chain": [
+    {
+      "source_hash": "<contract-analysis-fact-hash>",
+      "method": "document_analysis",
+      "weight": 0.5
+    },
+    {
+      "source_hash": "<deposition-episode-hash>",
+      "method": "testimony_extraction",
+      "weight": 0.3
+    },
+    {
+      "source_hash": "<email-review-toolcall-hash>",
+      "method": "email_analysis",
+      "weight": 0.2
+    }
+  ]
+}
+```
+
+Each entry in `provenance_chain` includes the `source_hash` (content address of the source grain), the `method` used to derive the knowledge, and the `weight` (how much that source contributed to the conclusion). The `derived_from` array provides a flat list of parent content addresses for quick traversal.
+
+When opposing counsel challenges a conclusion — "How did the AI determine there was a breach?" — the provenance chain provides the answer: it analyzed the contract terms (50% weight), reviewed the deposition testimony (30% weight), and examined the email correspondence (20% weight). Each source is itself a content-addressed grain that can be independently verified.
+
+## Immutability as audit trail
+
+The immutability guarantee in OMS (Section 1.1) — "once created, never modified" — is fundamental to legal applications. Grains are never edited in place. When information changes, supersession creates a new grain:
+
+```
+Original:     subject="contract-2024-001", relation="effective_date", object="2024-03-15"
+Superseding:  subject="contract-2024-001", relation="effective_date", object="2024-03-01"
+              derived_from=["<original-grain-hash>"]
+```
+
+The original grain is not deleted or modified. Its `superseded_by` field (populated by the index layer per Section 15.3) points to the new grain. Both grains exist permanently in the store. The complete history of every correction, every update, every change of understanding is preserved.
+
+For legal proceedings, this is precisely what courts require. An audit trail where records can be retroactively modified is worthless. An audit trail of immutable, content-addressed records where every change creates a new verifiable entry — that withstands scrutiny.
+
+The five timestamps per grain (Section 15.1) support bi-temporal queries essential for legal analysis:
+
+| Query | Answer |
+|-------|--------|
+| "What did the AI know about this contract on January 15?" | Filter by `system_valid_from` and `system_valid_to` |
+| "When was this contract actually effective?" | Check `valid_from` and `valid_to` |
+| "When was this fact first recorded?" | Check `created_at` |
+| "What was the system's understanding at the time of the alleged breach?" | Combine event-time and system-time filters |
+
+## .mg files as evidence packages
+
+When grains must be submitted to a court or shared with opposing counsel, the .mg file format (Section 11) serves as the evidence package.
+
+The .mg file structure includes:
+
+- **16-byte header**: Magic bytes `"MG\x01"`, flags (sorted, deduplicated, compressed), grain count, compression codec
+- **Offset index**: 4 bytes per grain for random access — grain #42 of 10,000 can be retrieved without reading the other 9,999
+- **Grain data**: The complete .mg blobs, each self-describing with its 9-byte header and MessagePack payload
+- **32-byte SHA-256 footer checksum**: Over header + index + grains, verifying the integrity of the entire file
+
+A single .mg file can contain all grains relevant to a case — Facts extracted from contracts, Episodes from depositions, ToolCalls documenting the analysis process, and the provenance chains linking them together. The footer checksum (Section 11.5) proves the file has not been tampered with since creation.
+
+```
+Evidence Package: case-456-production.mg
+
+Header:  MG\x01 | flags | 2,847 grains | field_map v1 | zstd compression
+Index:   2,847 × 4-byte offsets (random access)
+Grains:  847 Facts (contract analysis, testimony extraction)
+         423 Episodes (depositions, meeting notes, research)
+         1,102 ToolCalls (document review, database searches)
+         89 Goals (case milestones)
+         386 provenance-chain grains (linking everything)
+Footer:  SHA-256 checksum (32 bytes)
+```
+
+The receiving party — a court, opposing counsel, or a regulatory body — can independently verify the file: check the footer checksum, verify individual grain content addresses, validate COSE signatures where present, and traverse provenance chains from conclusions back to source documents.
+
+<Callout type="success">
+Because every grain in the .mg file is content-addressed, deduplication is automatic. If the same Fact appears in multiple provenance chains, it is stored once. The offset index enables random access even in large evidence packages. And the zstd compression (Section 11.3) reduces file sizes while preserving the ability to decompress and access individual grains.
+</Callout>
+
+## Putting it together: a litigation lifecycle
+
+Consider how these features compose across a full litigation lifecycle:
+
+**1. Document collection.** AI agents ingest contracts, emails, and corporate records. Each becomes a series of ToolCall grains (the ingestion process) and Fact grains (extracted knowledge). All carry `structural_tags: ["legal:litigation_hold"]` and `invalidation_policy: {mode: "locked", scope: "lineage"}`.
+
+**2. Document review.** Agents analyze documents for relevance and privilege. Privileged documents are tagged with `structural_tags: ["legal:privilege"]`. Review decisions are recorded as Fact grains with `source_type: "agent_inferred"` and provenance linking to the reviewed documents.
+
+**3. Deposition preparation.** Deposition summaries enter as Episodes. Key testimony is extracted as Facts with `derived_from` pointing to the Episode. Contradictions between testimony and documentary evidence are tracked through `related_to` cross-links with `relation_type: "contradicts"` (Section 14.3).
+
+**4. Discovery production.** Relevant, non-privileged grains are exported as an .mg evidence package. Privileged grains are selectively disclosed — content elided, existence proven — for the privilege log. The `_elided` map in each disclosed grain provides cryptographic proof that the withheld fields exist.
+
+**5. Trial.** The complete provenance chain from AI-generated conclusions to source documents is available for examination. COSE signatures prove who created what and when. Content addresses prove nothing has been tampered with. The immutability of grains means the full history is intact.
+
+At every stage, the same properties hold: grains are immutable, content-addressed, and cryptographically verifiable. Provenance chains are complete and traversable. Protected grains cannot be superseded. And the entire body of case knowledge can be packaged, shared, and independently verified through the .mg file format.
+
+Legal technology does not need a separate evidence management system, a separate chain-of-custody tracker, and a separate privilege management tool. With OMS, these are properties of the memory format itself — built into every grain, enforced by the specification, and verifiable by any conformant implementation.
