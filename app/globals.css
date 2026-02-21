@@ -113,7 +113,7 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: var(--fg-muted); }
 
 /* ─── Code (rehype-pretty-code dual theme) ───────────────────── */
-[data-rehype-pretty-code-fragment] {
+[data-rehype-pretty-code-figure] {
   position: relative;
   max-width: 100%;
 }
@@ -127,7 +127,7 @@ body {
   font-size: 0.75rem;
   padding: 0.5rem 1rem;
 }
-[data-rehype-pretty-code-fragment] pre {
+[data-rehype-pretty-code-figure] pre {
   border-radius: 8px;
   border: 1px solid var(--border);
   width: 100%;
@@ -137,11 +137,14 @@ body {
   line-height: 1.7;
   font-family: var(--font-mono);
   background: var(--code-bg) !important;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 [data-rehype-pretty-code-title] + pre {
   border-radius: 0 0 8px 8px;
 }
-[data-rehype-pretty-code-fragment] code {
+[data-rehype-pretty-code-figure] code {
   background: transparent;
   border: none;
   padding: 0;
@@ -149,10 +152,14 @@ body {
   color: inherit;
 }
 /* Dual theme switching */
-[data-rehype-pretty-code-fragment] pre[data-theme="dark"] { display: none; }
-[data-rehype-pretty-code-fragment] pre[data-theme="light"] { display: block; }
-.dark [data-rehype-pretty-code-fragment] pre[data-theme="dark"] { display: block; }
-.dark [data-rehype-pretty-code-fragment] pre[data-theme="light"] { display: none; }
+[data-rehype-pretty-code-figure] pre[data-theme="dark"] { display: none; }
+[data-rehype-pretty-code-figure] pre[data-theme="light"] { display: block; }
+.dark [data-rehype-pretty-code-figure] pre[data-theme="dark"] { display: block; }
+.dark [data-rehype-pretty-code-figure] pre[data-theme="light"] { display: none; }
+/* When only dark-theme pre is generated, darken its colors in light mode for readability */
+html:not(.dark) [data-rehype-pretty-code-figure] pre span[style] {
+  filter: brightness(0.55) saturate(1.8);
+}
 
 /* Line numbers */
 code[data-line-numbers] { counter-reset: line; }
@@ -253,6 +260,10 @@ code[data-line-numbers] [data-line]::before {
 }
 .prose pre {
   margin: 1.5rem 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  color: var(--fg);
 }
 .prose table {
   width: 100%;

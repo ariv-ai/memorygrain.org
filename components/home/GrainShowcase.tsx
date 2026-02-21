@@ -131,11 +131,13 @@ const cards: GrainCard[] = [
     payload: {
       type: 'tool_call',
       tool_name: 'portfolio.rebalance',
-      arguments: { account: '401k-primary', target_bonds: 0.4 },
-      result: { status: 'executed', trades: 3 },
+      arguments: { account: '401k-primary', target_bonds: 0.4, strategy: 'tax_loss_harvest' },
+      result: { status: 'executed', trades: 3, net_change_pct: -0.12 },
       success: true,
       duration_ms: 847,
       created_at: 1740012800000,
+      namespace: 'finance:trading',
+      user_id: 'john-smith',
     },
     readers: [
       { agent: 'TaxBot', use: 'deduction tracking' },
@@ -213,7 +215,7 @@ const C = {
   str: 'var(--workflow)',
   num: 'var(--observation)',
   bool: 'var(--checkpoint)',
-  punct: 'var(--fg-muted)',
+  punct: 'var(--fg-secondary)',
 }
 
 function renderValue(val: string): ReactNode {
@@ -706,7 +708,7 @@ export function GrainShowcase() {
                         margin: 0,
                         padding: '0 1.25rem 1.25rem',
                         fontFamily: 'var(--font-mono)',
-                        fontSize: 'clamp(0.6875rem, 1.3vw, 0.75rem)',
+                        fontSize: 'clamp(0.75rem, 1.4vw, 0.8125rem)',
                         lineHeight: 1.7,
                         overflowY: 'auto',
                         overflowX: 'hidden',

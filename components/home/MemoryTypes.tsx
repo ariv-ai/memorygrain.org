@@ -1,13 +1,13 @@
 import { Database, ScrollText, Bookmark, GitBranch, Wrench, Activity, Target, type LucideIcon } from 'lucide-react'
 
 const types: { key: string; label: string; color: string; icon: LucideIcon; description: string; example: string; byte: string }[] = [
-  { key: 'fact', label: 'Fact', color: 'var(--fact)', icon: Database, description: 'Structured knowledge claims modeled as semantic triples: subject–relation–object. The core of any knowledge graph.', example: '{ "subject": "raven-001", "relation": "knows_route", "object": "depot→dock-7" }', byte: '0x01' },
-  { key: 'episode', label: 'Episode', color: 'var(--episode)', icon: ScrollText, description: 'Raw, unstructured interaction records — the raw material that consolidation engines process into structured Facts.', example: '{ "content": "Raven asked Trident for the fastest route to dock 7..." }', byte: '0x02' },
-  { key: 'checkpoint', label: 'Checkpoint', color: 'var(--checkpoint)', icon: Bookmark, description: 'Agent state snapshots for save/restore. Enables forensic debugging — load a checkpoint to replay any decision exactly.', example: '{ "context": { "mission": "delivery", "step": 12, "eta": 42 } }', byte: '0x03' },
-  { key: 'workflow', label: 'Workflow', color: 'var(--workflow)', icon: GitBranch, description: 'Procedural memory — learned sequences of actions. Triggered by a condition, a workflow encodes repeatable procedures.', example: '{ "trigger": "battery < 15%", "steps": ["dock", "charge", "report"] }', byte: '0x04' },
-  { key: 'toolcall', label: 'ToolCall', color: 'var(--toolcall)', icon: Wrench, description: 'Complete record of a tool or function invocation: arguments, result, duration, success status. Full tool audit trail.', example: '{ "tool_name": "navigate", "args": { "dest": "dock-7" }, "ok": true }', byte: '0x05' },
-  { key: 'observation', label: 'Observation', color: 'var(--observation)', icon: Activity, description: 'Observer readings — physical sensors, AI cognitive agents, or humans. Generalized observer model for high-volume, time-critical data.', example: '{ "observer_id": "lidar-f01", "observer_type": "lidar", "object": "2.1m" }', byte: '0x06' },
-  { key: 'goal', label: 'Goal', color: 'var(--goal)', icon: Target, description: 'Explicit objectives set by humans or inferred by agents. Lifecycle-aware — active → satisfied | failed | suspended. State transitions are immutable; each update supersedes via provenance chain.', example: '{ "description": "Reduce p99 latency < 100ms", "goal_state": "active", "priority": 2 }', byte: '0x07' },
+  { key: 'fact', label: 'Fact', color: 'var(--fact)', icon: Database, description: 'Structured knowledge claims modeled as semantic triples: subject–relation–object. The core of any knowledge graph.', example: '{ "subject": "customer-4821", "relation": "has_plan", "object": "enterprise-tier" }', byte: '0x01' },
+  { key: 'episode', label: 'Episode', color: 'var(--episode)', icon: ScrollText, description: 'Raw, unstructured interaction records — the raw material that consolidation engines process into structured Facts.', example: '{ "content": "Customer asked about upgrading their plan and adding 5 seats..." }', byte: '0x02' },
+  { key: 'checkpoint', label: 'Checkpoint', color: 'var(--checkpoint)', icon: Bookmark, description: 'Agent state snapshots for save/restore. Enables forensic debugging — load a checkpoint to replay any decision exactly.', example: '{ "context": { "case": "claim-7291", "step": 4, "status": "review" } }', byte: '0x03' },
+  { key: 'workflow', label: 'Workflow', color: 'var(--workflow)', icon: GitBranch, description: 'Procedural memory — learned sequences of actions. Triggered by a condition, a workflow encodes repeatable procedures.', example: '{ "trigger": "claim_amount > $10k", "steps": ["flag", "escalate", "notify_manager"] }', byte: '0x04' },
+  { key: 'toolcall', label: 'ToolCall', color: 'var(--toolcall)', icon: Wrench, description: 'Complete record of a tool or function invocation: arguments, result, duration, success status. Full tool audit trail.', example: '{ "tool_name": "lookup_policy", "args": { "id": "POL-4821" }, "ok": true }', byte: '0x05' },
+  { key: 'observation', label: 'Observation', color: 'var(--observation)', icon: Activity, description: 'Runtime signals from AI agents, monitoring systems, or human reviewers. Captures sentiment shifts, anomalies, and real-time assessments.', example: '{ "observer_id": "support-agent", "observer_type": "agent", "signal": "negative_sentiment" }', byte: '0x06' },
+  { key: 'goal', label: 'Goal', color: 'var(--goal)', icon: Target, description: 'Explicit objectives set by humans or inferred by agents. Lifecycle-aware — active → satisfied | failed | suspended. State transitions are immutable; each update supersedes via provenance chain.', example: '{ "description": "Resolve claim within SLA (48h)", "goal_state": "active", "priority": 1 }', byte: '0x07' },
 ]
 
 export function MemoryTypes() {
@@ -52,12 +52,12 @@ export function MemoryTypes() {
                   aria-label={`${label} grain example`}
                   style={{
                     background: 'transparent',
-                    border: '1px solid var(--border)',
+                    border: 'none',
                     borderRadius: 6,
                     padding: '0.625rem 0.75rem',
-                    fontSize: '0.7rem',
+                    fontSize: '0.75rem',
                     fontFamily: 'var(--font-mono)',
-                    color: 'var(--fg-muted)',
+                    color: 'var(--fg-secondary)',
                     overflow: 'auto',
                     margin: 0,
                     lineHeight: 1.6,
